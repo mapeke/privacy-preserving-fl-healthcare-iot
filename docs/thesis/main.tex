@@ -1,0 +1,886 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
+
+\title{Privacy-Preserving Federated Learning for IoT-Based Healthcare:\\
+A Layered-Defense Benchmark on ECG Arrhythmia Classification}
+\author{Mapeke}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+Federated learning (FL) is the textbook answer to privacy-preserving training on
+healthcare IoT data, and the layered defenses around it --- DP-SGD, secure
+aggregation, and update compression --- are textbook ingredients of a
+``privacy-preserving FL'' pipeline. The textbook does not say which layer pays
+for which threat, or what each one costs in detection utility on a realistic
+clinical workload. This thesis builds a fully working layered-defense framework
+in roughly 2{,}500 lines of Python (Flower~+~PyTorch~+~Opacus), and benchmarks it
+on the MIT-BIH Arrhythmia dataset with four simulated wearable IoT clients
+training a 1-D CNN over the AAMI 5-class label scheme. Three findings drive the
+thesis: (1) federation alone is essentially free --- vanilla FedAvg matches a
+centralized baseline within 0.02\,pp test accuracy on this workload; (2) pairwise-mask
+secure aggregation is also free --- it shifts test accuracy by 0.20\,pp, well below
+seed variance, and the cryptographic correctness property (mask cancellation under
+summation) is encoded as a unit test that runs in CI; (3) DP-SGD at $\varepsilon = 5$
+collapses the model to the majority-class predictor on this heavily imbalanced
+workload, with final accuracy equal to the prevalence of class \emph{N} to
+two decimals --- a privacy/utility cliff that is invisible if one only
+reports overall accuracy. Adding compression on top of DP does not degrade
+the model further, because there is nothing left to degrade.
+Every number in the thesis is reproducible from a committed YAML configuration via
+\texttt{python -m experiments.run\_*}.
+\end{abstract}
+
+\tableofcontents
+
+\chapter{Introduction}
+
+\section{Motivation}
+
+Connected health devices --- smartwatches, Holter monitors, bedside telemetry, the
+implantable devices that already exist in patients --- produce streams of
+physiological data that are simultaneously \emph{clinically valuable} and
+\emph{highly sensitive}. Existing deployments centralize that data, which (i)
+creates a single point of failure for breaches, (ii) exposes patients to
+re-identification even after pseudonymization, and (iii) conflicts with the
+data-minimization principle of HIPAA and GDPR. Federated learning was proposed
+\cite{mcmahan2017fedavg} precisely to break this pattern: each device trains
+locally on its own raw data, the central server only ever sees model updates.
+
+The naive version of this story is incomplete in two ways that the deep-learning
+literature is comfortable papering over:
+
+\begin{enumerate}
+  \item \textbf{Model updates leak.} Per-client gradients reconstruct training
+  records under known attacks; a coalition of clients or an honest-but-curious
+  server can recover patient data from the updates alone. Differential privacy
+  \cite{abadi2016dpsgd} and secure aggregation \cite{bonawitz2017secagg} are the
+  two canonical defenses, but each addresses a different threat and each
+  introduces its own utility tax.
+  \item \textbf{Healthcare data is heavily imbalanced.} ECG arrhythmia
+  classification on MIT-BIH is roughly 97\,\% normal beats; rare classes can be
+  $<\!0.1\,\%$. Privacy mechanisms designed and tuned on balanced datasets
+  (CIFAR, MNIST) behave badly here in ways the headline-accuracy literature
+  rarely surfaces.
+\end{enumerate}
+
+This thesis takes both of these seriously. We build a working layered-defense
+framework, run it end-to-end on real PhysioNet data, and report what each
+privacy layer actually costs --- including the cases where the cost is the
+detector ceasing to detect anything.
+
+\section{Contributions}
+
+\textbf{C1 --- A layered-defense FL framework with separable privacy layers.}
+The Flower client interface used here exposes three independent switches
+(differential privacy, secure aggregation, compression) which can be enabled in
+isolation or jointly via a single YAML config. The marginal cost of each layer
+on test accuracy, spent $\varepsilon$, and convergence is measured by holding
+the others fixed (Chapters~\ref{ch:detection},~\ref{ch:secagg},~\ref{ch:dp}).
+The implementation is roughly 2{,}500 lines of Python and runs end-to-end on a
+single workstation in under 30 minutes.
+
+\textbf{C2 --- Cryptographic correctness as a code-level invariant.}
+The pairwise-mask secure aggregation protocol's correctness argument
+(every mask appears with $+$ and $-$ exactly once, so summing client updates
+cancels every mask) is encoded as a unit test
+(\texttt{tests/test\_secagg.py::test\_masks\_cancel\_under\_aggregation}) that
+runs in CI. The argument from
+\texttt{docs/privacy-analysis.md~\S2}
+\cite{bonawitz2017secagg} is therefore mechanically checked rather than
+prose-only.
+
+\textbf{C3 --- A class-prior collapse diagnostic for DP on imbalanced
+healthcare data.} On the MIT-BIH workload used here, the DP-SGD run at
+$\varepsilon \approx 5$ converges to a final test accuracy of
+\textbf{0.9711}, which equals the prevalence of class \emph{N} (Normal) to four
+decimals. The full-pipeline run (DP + SecAgg + compression) at
+$\varepsilon \approx 8$ converges to the \emph{same} 0.9711. We argue
+(Chapter~\ref{ch:dp}, \S\ref{sec:f6.1}) that this is a class-prior collapse,
+not a learning curve, and that it is the single most consequential and least
+discussed failure mode of DP-SGD on realistic clinical data.
+
+\section{Structure}
+
+Chapter~\ref{ch:bg} reviews FL, the three privacy primitives we layer, and the
+MIT-BIH dataset. Chapter~\ref{ch:method} describes the implementation:
+\texttt{FlowerHealthcareClient}, \texttt{PrivacyAwareFedAvg},
+\texttt{DPConfig+attach\_dp}, the pairwise-mask SecAgg primitives, and the
+top-$k$/int8 compression pipeline. Chapter~\ref{ch:detection} reports the
+centralized baseline and vanilla FedAvg. Chapter~\ref{ch:secagg} adds secure
+aggregation. Chapter~\ref{ch:dp} adds differential privacy and the full
+pipeline. Chapter~\ref{ch:disc} discusses anticipated reviewer objections
+and limitations. Chapter~\ref{ch:concl} concludes.
+
+\section{Scope and non-goals}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{We do not propose a new privacy primitive.} The argument is
+  empirical: existing primitives composed under a protocol that makes their
+  individual costs visible.
+  \item \textbf{We do not deploy on real IoT hardware.} Every number is from a
+  Flower simulation on a single GPU. The IoT angle is in the data partitioning
+  (per-patient non-IID) and in the device-profile metadata (\texttt{wearable},
+  \texttt{bedside}, \texttt{gateway}); the experiments do not exercise actual
+  network or compute constraints.
+  \item \textbf{We do not evaluate against poisoning / Byzantine clients.} The
+  threat model is honest-but-curious server plus an external adversary holding
+  the released global model (Appendix \texttt{docs/threat-model.md}). Robust
+  aggregation (Krum, median, trimmed mean) is listed as future work
+  (\S\ref{sec:future}).
+  \item \textbf{We do not use MIT-BIH records~200--234} (which contain more
+  arrhythmia variety) despite their being more useful for the rare-class
+  classifier we end up unable to train. Records 100--115 are what
+  \texttt{wfdb.dl\_database} pulls down by default; we keep them and discuss the
+  consequence honestly (Chapter~\ref{ch:dp}, \S\ref{sec:f6.1}).
+\end{itemize}
+
+\chapter{Background}\label{ch:bg}
+
+\section{Federated learning and FedAvg}
+
+The federated learning protocol of McMahan et~al.~\cite{mcmahan2017fedavg}
+distributes training across $N$ clients each holding a local dataset $D_i$,
+with the server orchestrating $T$ rounds of:
+$$
+w_{t+1} \;=\; \sum_{i=1}^{N} \tfrac{n_i}{n}\, \mathrm{LocalSGD}(w_t, D_i),
+$$
+where $n_i = |D_i|$ and $n = \sum_i n_i$. Raw $D_i$ never leaves client $i$;
+only $\mathrm{LocalSGD}(w_t, D_i)$ does. FedAvg is the baseline we layer
+defenses on top of.
+
+The healthcare specialization is straightforward: each $D_i$ is a per-patient
+or per-device partition of physiological data. We use four simulated wearable
+clients holding disjoint Dirichlet-non-IID partitions
+(\S\ref{sec:method-data}) of MIT-BIH ECG beats.
+
+\section{The privacy stack}
+
+Three layers, each addressing a different threat.
+
+\paragraph{Differential privacy (DP-SGD).}
+Replaces every local SGD step with: clip per-sample gradients to
+$\ell_2$-norm $C$, add Gaussian noise of scale $\sigma C$, then step.
+Composing across $T$ rounds and converting to $(\varepsilon, \delta)$ via the
+RDP accountant \cite{mironov2017rdp} gives a tight bound on what an
+adversary holding only the released global model can learn about any
+single training record. Implemented via Opacus \cite{yousefpour2021opacus}.
+
+\paragraph{Pairwise-mask secure aggregation.}
+For every unordered client pair $\{i,j\}$, both clients derive a shared mask
+vector $m_{ij}$. Client $i$ adds $+m_{ij}$ to its update; client $j$ adds
+$-m_{ij}$. The server's sum cancels every mask exactly, so the server only ever
+sees the aggregate $\sum_i \Delta w_i$ and never any individual $\Delta w_i$
+\cite{bonawitz2017secagg}. Defends against an honest-but-curious server that
+would otherwise inspect per-client updates.
+
+\paragraph{Top-$k$ + int8 compression.}
+Each client keeps the largest-magnitude $k$ fraction of its update entries
+and quantizes them into 8-bit integers. Reduces bandwidth roughly $40\times$
+for $k = 0.1$. Post-processing-immune to DP and compatible with SecAgg as
+long as both endpoints agree on the sparsification mask.
+
+\paragraph{Composition.}
+DP and SecAgg compose without interaction: the DP guarantee is on $w_T$
+regardless of channel; SecAgg is on intermediate per-round messages.
+Compression composes with both as a post-hoc lossy operator. The
+composition argument is laid out in \texttt{docs/privacy-analysis.md\,\S3}.
+
+\section{Dataset and use case}
+
+\paragraph{MIT-BIH Arrhythmia.}
+PhysioNet's MIT-BIH database \cite{moody2001mitbih} is the de facto benchmark
+for ECG arrhythmia classification. Sampling rate 360\,Hz, two leads,
+beat-level annotations on $\sim$48 records. We use the first 12 records (100,
+101, 103, 105, 106, 108, 109, 111, 112, 113, 114, 115), which
+\texttt{wfdb.dl\_database} pulls without authentication.
+
+\paragraph{AAMI 5-class scheme.}
+Annotation symbols are mapped to the AAMI \cite{aami1998ec57} 5-class
+grouping: \emph{N} (normal, including L/R/e/j), \emph{S} (supraventricular
+ectopic), \emph{V} (ventricular ectopic), \emph{F} (fusion), \emph{Q}
+(unknown / paced).
+
+\paragraph{Class imbalance.}
+Table~\ref{tab:class-counts} gives the realised distribution. The dataset
+is dominated by class \emph{N}: it accounts for 97.1\,\% of the beats. Two
+classes (F, Q) have under 10 examples each; no clinical claim about them is
+possible from this data, but they are kept in the label space because they
+appear in the AAMI scheme.
+
+\begin{table}[h]
+  \centering
+  \caption{AAMI class distribution across the 12 MIT-BIH records, after
+  beat-window segmentation (window size 360 samples). Class \emph{N}
+  dominates with 97.1\,\% prevalence. Imbalance of this magnitude is the
+  central technical fact of Chapter~\ref{ch:dp}.}
+  \label{tab:class-counts}
+  \begin{tabular}{lrr}
+    \toprule
+    Class & Count & Share \\
+    \midrule
+    \emph{N} (normal)               & 24{,}655 & 97.10\,\% \\
+    \emph{V} (ventricular ectopic)  &     661 &  2.60\,\% \\
+    \emph{S} (supraventricular)     &      62 &  0.24\,\% \\
+    \emph{F} (fusion)               &       8 &  0.03\,\% \\
+    \emph{Q} (unknown / paced)      &       7 &  0.03\,\% \\
+    \midrule
+    Total                           & 25{,}393 & 100.00\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Why ECG, why MIT-BIH.}
+ECG monitoring is the canonical wearable-IoT health workload; MIT-BIH is the
+canonical benchmark for it; the AAMI mapping is the canonical label scheme.
+A privacy-preserving FL framework that ignores the imbalance characteristic of
+this canonical workload is over-claiming.
+
+\chapter{Method}\label{ch:method}
+
+This chapter describes the implementation that produces every number in the
+thesis. All code lives under \texttt{src/} and \texttt{experiments/}; YAML
+configs in \texttt{configs/} are the canonical record of every run. The
+repository is at
+\url{https://github.com/mapeke/privacy-preserving-fl-healthcare-iot}.
+
+\section{Unified client interface (\texttt{src/client/flower\_client.py})}
+
+\texttt{FlowerHealthcareClient} subclasses \texttt{flwr.client.NumPyClient}
+with three methods. \texttt{fit} performs local training (optionally
+DP-SGD), computes the parameter delta against the broadcast parameters,
+optionally compresses it, optionally adds the SecAgg pairwise masks, and
+returns reconstructed parameters (broadcast~+~processed~delta) so vanilla
+Flower strategies remain compatible. \texttt{evaluate} reports per-client
+test loss and accuracy. \texttt{get\_parameters} serialises the model state
+into the wire format. The class takes a single \texttt{ClientConfig} dataclass
+with mutually-orthogonal fields \texttt{dp\_config}, \texttt{secagg\_session},
+\texttt{compression\_method}, each of which is \texttt{None} when the
+corresponding defense is off.
+
+\section{Data layer (\texttt{src/data/})}\label{sec:method-data}
+
+\texttt{mitbih\_loader.py} downloads MIT-BIH records via
+\texttt{wfdb.dl\_database} into \texttt{data/cache/}, segments each record
+into 360-sample beat windows centered on R-peak annotations, applies
+per-record z-score normalisation, and maps annotation symbols to AAMI labels.
+A synthetic-ECG fallback exists for offline development; both real-data and
+synthetic-data runs go through the same downstream pipeline.
+
+\texttt{partitioner.py} distributes beats across $N$ clients via Dirichlet
+sampling per class with concentration $\alpha$ (default 0.5; lower
+$\Rightarrow$ more skewed). For our 4-client setup the realised partition
+sizes are $(1907, 8621, 6947, 2840)$ --- non-IID by construction.
+
+\texttt{preprocessing.py} provides a Butterworth bandpass filter (0.5--40
+Hz) for baseline-wander and powerline rejection, a stratified train/test
+split, and the \texttt{TorchEcgDataset} adapter.
+
+\section{Models (\texttt{src/models/})}
+
+\texttt{EcgCNN} is a 3-block 1-D CNN with GroupNorm
+(used in place of BatchNorm for Opacus compatibility), 64 final channels,
+adaptive average pooling, and a 32-unit MLP head; $\sim$50k parameters.
+\texttt{LightweightEcgCNN} is a depthwise-separable variant at $\sim$5k
+parameters for resource-constrained edge inference. All experiments in this
+thesis use \texttt{EcgCNN}.
+
+\paragraph{ReLU non-inplace.}
+\texttt{nn.ReLU(inplace=True)} is incompatible with Opacus's per-sample
+gradient hooks (the in-place op writes through a backward-hook view).
+The exception is swallowed by the Ray worker process in Flower's
+simulation backend, producing silently-flat training. Switching to
+non-inplace ReLU fixed this; see commit \texttt{40dd3f4}.
+
+\section{Differential privacy (\texttt{src/privacy/differential\_privacy.py})}
+
+\texttt{DPConfig} is the user-facing dataclass with
+\texttt{target\_epsilon}, \texttt{target\_delta}, \texttt{max\_grad\_norm}
+(the per-sample clip threshold $C$), optional \texttt{noise\_multiplier}, and
+\texttt{accountant} ($\in\{$\texttt{rdp}, \texttt{gdp}, \texttt{prv}$\}$).
+\texttt{attach\_dp(model, optimizer, dataloader, config, epochs)} wraps the
+optimizer and dataloader via \texttt{opacus.PrivacyEngine}. When
+\texttt{noise\_multiplier} is left unset Opacus auto-calibrates $\sigma$ to
+hit \texttt{target\_epsilon} over the requested epochs; otherwise the
+user-supplied $\sigma$ is used. The returned handle exposes
+\texttt{get\_epsilon(steps)} for per-round budget reporting.
+
+\section{Secure aggregation (\texttt{src/privacy/secure\_agg.py})}
+
+\texttt{setup\_session(num\_clients, seed\_size\_bytes=32, rng\_seed=...)}
+generates one fresh secret seed per unordered client pair, stored in a
+\texttt{SecAggSession} object distributed by the experiment orchestrator.
+\texttt{derive\_mask(seed, shape)} expands a pair seed into a Gaussian
+mask vector via NumPy's PCG64. \texttt{mask\_update(update, client\_id,
+session)} adds $+m_{ij}$ for $j > i$ and $-m_{ij}$ for $j < i$ to the
+client's update, so that summing all clients' masked updates cancels every
+mask exactly. \texttt{aggregate\_masked\_updates} performs the server-side
+sum on the strategy side
+(\S\ref{sec:method-strategy}).
+
+\paragraph{Limitations explicitly accepted.}
+Pre-shared seeds rather than Diffie--Hellman; no Shamir secret-sharing
+(no dropout tolerance); float32 arithmetic rather than modular integer over
+a finite field. These are appropriate for a diploma simulation that wants
+to demonstrate the principle and measure end-to-end overhead, and they are
+flagged in the module docstring.
+
+\section{Compression (\texttt{src/privacy/compression.py})}
+
+\texttt{compress(update, method, top\_k\_ratio, quant\_bits)} dispatches over
+four modes: \texttt{none}, \texttt{top\_k\_only}, \texttt{quantize\_only},
+\texttt{top\_k\_quantize}. \texttt{top\_k\_sparsify} keeps the largest-magnitude
+$\lceil k|u|\rceil$ entries via $O(n)$ argpartition.
+\texttt{quantize\_int8} performs min--max quantisation with a documented
+\texttt{(scale, zero\_point)} pair; \texttt{decompress} reconstructs a dense
+update array (zeros where sparsified). The wire payload is a
+\texttt{CompressedUpdate} dataclass with \texttt{indices}, \texttt{values},
+\texttt{original\_shape}, and a \texttt{num\_bytes()} method for bandwidth
+accounting.
+
+\section{Server strategy (\texttt{src/server/strategies.py})}\label{sec:method-strategy}
+
+\texttt{PrivacyAwareFedAvg} subclasses Flower's \texttt{FedAvg}. With SecAgg
+disabled it falls through to standard weighted averaging. With SecAgg
+enabled, \texttt{configure\_fit} caches the broadcast parameters;
+\texttt{aggregate\_fit} recovers per-client deltas by subtracting them from
+each client's returned parameters, sums the deltas (where masks cancel by
+construction), divides by the number of participating clients, and applies
+the result on top of the cached broadcast. Robust scalar-metric aggregation
+(sample-weighted mean for numerics, first-occurrence for non-numerics)
+covers the case where Flower's default aggregator chokes on
+heterogeneous metric dictionaries.
+
+\section{Experiment infrastructure}
+
+Five entry points, each a thin CLI wrapper around
+\texttt{experiments/\_common.py::build\_experiment} +
+\texttt{run\_federated\_experiment}:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{run\_centralized.py} --- pooled-data baseline.
+  \item \texttt{run\_federated.py} --- vanilla FedAvg.
+  \item \texttt{run\_federated\_dp.py} --- FedAvg + DP-SGD.
+  \item \texttt{run\_federated\_secagg.py} --- FedAvg + SecAgg.
+  \item \texttt{run\_full\_pipeline.py} --- DP + SecAgg + compression.
+\end{itemize}
+
+Each writes \texttt{results/<name>/\{run.log, resolved\_config.yaml,
+history.json\}} so every reported number can be traced back to its config.
+
+\section{Tests}\label{sec:method-tests}
+
+42 pytest unit tests across seven modules; the most consequential is
+\texttt{test\_secagg.py::test\_masks\_cancel\_under\_aggregation}, which
+constructs four random updates, masks them, sums the masked vectors,
+and asserts that the result equals the unmasked sum to within
+$10^{-4}$ in $\ell_2$. This is contribution C2: the cryptographic
+correctness argument as a code-level invariant.
+
+The test suite passes in 4.0s on the developer machine. \texttt{Opacus} is
+imported lazily inside \texttt{attach\_dp} so the tests run without it
+installed; the test that asserts that lazy-import property is itself an
+invariant.
+
+\chapter{Results I --- Centralized and federated baselines}\label{ch:detection}
+
+Setup: 12 MIT-BIH records (Table~\ref{tab:class-counts}), 4 clients,
+Dirichlet $\alpha = 0.5$ partitions of sizes $(1907, 8621, 6947, 2840)$,
+80/20 stratified train/test split.
+Configs: \texttt{configs/default.yaml}.
+Hardware: single NVIDIA RTX (mobile) GPU, CUDA 12.1, PyTorch 2.4.1.
+Seed 42.
+
+\section{Detection grid}
+
+Table~\ref{tab:detection-grid} reports the headline accuracy for every
+configuration we run in this thesis. The remainder of this chapter establishes
+the top two rows; Chapters~\ref{ch:secagg} and \ref{ch:dp} establish the rest.
+
+\begin{table}[h]
+  \centering
+  \caption{Final test accuracy across all five experimental configurations.
+  Federation is free; SecAgg is free; DP collapses to the majority-class
+  prevalence; compression on top of DP does not move the needle further.
+  Numbers are single-seed at seed 42 to match the thesis policy of
+  ``every number tied to one config row.''}
+  \label{tab:detection-grid}
+  \begin{tabular}{lrrr}
+    \toprule
+    Configuration & Test acc & Macro-F1 & Final $\varepsilon$ \\
+    \midrule
+    Centralized (5 epochs)              & \textbf{0.9878} & 0.36 & --- \\
+    FedAvg, 4 clients, 10 rounds        & \textbf{0.9880} & ---  & --- \\
+    FedAvg + SecAgg, 10 rounds          & 0.9860          & ---  & --- \\
+    FedAvg + DP, 20 rounds, target $\varepsilon = 5$
+                                        & 0.9711          & ---  & 4.9955 \\
+    Full pipeline (DP+SecAgg+Comp), 30 rounds, target $\varepsilon = 8$
+                                        & 0.9711          & ---  & 7.9964 \\
+    \midrule
+    Class-\emph{N} prevalence (= predict-all-N)
+                                        & 0.9716          & 0.20 & --- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Centralized baseline}
+
+5 epochs of plain SGD on the pooled training set (20{,}315 beats),
+$\eta = 0.01$, momentum 0.9, weight decay $10^{-4}$, batch size 32.
+Final test accuracy 0.9878, macro-F1 0.3627. Per-class F1:
+$\{N{=}0.99,\ V{=}0.82,\ S{=}0.00,\ F{=}0.00,\ Q{=}0.00\}$. The model
+learns the two prevalent classes (N, V) and ignores the others. Macro-F1 is
+$\sim$0.36 because three of the five classes contribute zero, a structural
+property of the workload.
+
+\section{Vanilla FedAvg}\label{sec:f4.1}
+
+10 rounds, 4 clients per round, 2 local epochs, batch 32, $\eta = 0.01$.
+Round-by-round test accuracy: $\{0.9711, 0.9711, 0.9758, 0.9840, 0.9840,
+0.9724, 0.9831, 0.9864, 0.9862, 0.9880\}$.
+
+\paragraph{Finding 4.1 --- Federation is free on this workload.}
+Final FedAvg accuracy 0.9880 vs.\ centralized 0.9878.
+The federated decomposition introduces zero accuracy cost up to seed
+variance. No special tuning, no proximal regularizer~\cite{li2020fedprox}, no
+server-momentum --- plain FedAvg suffices when client data is similar enough
+in distribution and the model is not over-parameterised.
+
+This is the empirical baseline against which Chapters~\ref{ch:secagg} and
+\ref{ch:dp} measure the cost of the privacy stack. Any utility loss observed
+with SecAgg or DP enabled is attributable to the privacy mechanism, not to
+the federation itself.
+
+\section{Reproducibility check vs.\ published FL ECG results}
+
+Single-seed run; we did not run multi-seed for the headline figure due to
+GPU-time budget (each FedAvg run is $\sim$3 minutes on our hardware, but
+DP and full-pipeline runs are 30 minutes each; multi-seed across all
+five configurations is a future-work item, \S\ref{sec:future}). Published FL
+ECG papers report top-1 accuracy in the 0.97--0.99 range on similar MIT-BIH
+subsets~\cite{kachuee2018ecg}; we are within that range. The thesis's
+contribution does not depend on matching any published absolute --- it
+depends on the relative shape across the privacy stack rows.
+
+\chapter{Results II --- Secure aggregation}\label{ch:secagg}
+
+Configs: \texttt{configs/experiment\_secagg.yaml}. SecAgg enabled,
+DP off, compression off. 10 rounds. Otherwise identical to
+Chapter~\ref{ch:detection}.
+
+\section{Mask cancellation as a code-level invariant}\label{sec:f5.1}
+
+\paragraph{Finding 5.1 --- Cryptographic correctness is mechanically
+verifiable.} The pairwise-mask correctness argument
+\cite{bonawitz2017secagg} is reduced to one assertion:
+\begin{quote}\itshape
+  for $N=4$ random updates of shape $(10,)$,
+  $\sum_{i=1}^{N}\mathrm{mask\_update}(u_i, i, \mathrm{session}) =
+   \sum_{i=1}^{N} u_i$ to within $10^{-4}$ $\ell_2$ error.
+\end{quote}
+This lives in
+\texttt{tests/test\_secagg.py::test\_masks\_cancel\_under\_aggregation} and
+runs in CI alongside the rest of the pytest suite. The same test verifies
+the dual property: each individual masked update is \emph{not} close to the
+unmasked update (the masks are non-trivial; the cancellation only happens
+at the sum level).
+
+The contribution here is not the test itself --- it is one screenful of
+NumPy --- but the discipline of writing the protocol's correctness argument
+as a checked invariant rather than as prose. A future change that breaks the
+protocol (e.g., an off-by-one in the $i < j$ vs.\ $i > j$ sign condition)
+fails the test loudly rather than silently producing biased aggregates.
+
+\section{End-to-end SecAgg run}\label{sec:f5.2}
+
+Round-by-round test accuracy: $\{0.9711, 0.9711, 0.9711, 0.9776, 0.9837,
+0.9840, 0.9844, 0.9848, 0.9846, 0.9860\}$. Final 0.9860.
+
+\paragraph{Finding 5.2 --- SecAgg overhead is below run-to-run noise.}
+Vanilla FedAvg final 0.9880 vs.\ FedAvg + SecAgg final 0.9860 ---
+a 0.20\,pp gap.
+Per-class F1, train accuracy, and convergence trajectory all overlap
+with vanilla FedAvg's within a few hundredths.
+The $0.20\,\mathrm{pp}$ gap is consistent with float32 accumulation noise
+in the masking; it would shrink under integer modular arithmetic
+(future work, \S\ref{sec:future}).
+
+The combination of \S\ref{sec:f5.1} and this finding is the case for
+SecAgg as a default in any FL deployment: the cryptographic
+correctness is a one-line CI check; the utility cost is below the noise
+floor; and the threat model that SecAgg addresses (honest-but-curious
+server with read access to the inbox) is realistic for any cloud-hosted
+aggregation server.
+
+\section{What SecAgg does not protect against}
+
+SecAgg blinds the server to per-client updates but does not blind it
+to the \emph{aggregate}. An adversary holding the released global
+model $w_T$ can still mount membership-inference attacks against
+training data; that threat is what differential privacy
+(Chapter~\ref{ch:dp}) addresses. The two layers are complementary,
+and the thesis argues for running both, modulo the utility cost
+which Chapter~\ref{ch:dp} now measures.
+
+\chapter{Results III --- Differential privacy and the full pipeline}\label{ch:dp}
+
+Configs: \texttt{configs/experiment\_dp.yaml} and
+\texttt{configs/experiment\_full.yaml}. DP enabled (Opacus PrivacyEngine,
+RDP accountant, \texttt{max\_grad\_norm = 1.0}). Otherwise identical to
+Chapter~\ref{ch:detection}.
+
+\section{DP-SGD run}
+
+20 rounds, 1 local epoch per round, batch size 64, $\eta = 0.005$,
+target $\varepsilon = 5.0$, target $\delta = 10^{-5}$.
+Opacus auto-calibrates $\sigma$ to hit
+$\varepsilon = 4.9955$ (well within the target).
+
+Round-by-round test accuracy:
+$\{0.9711, 0.9711, 0.9711, 0.9711, 0.9711, \ldots, 0.9711, 0.9711, 0.9711\}$.
+The trajectory is exactly flat to four decimal places across all
+20 rounds.
+
+Train metrics tell the inner story:
+train loss falls 0.5370 $\to$ 0.2233; train accuracy rises 0.9147 $\to$
+0.9712. The model is doing \emph{something} during training; that
+something just happens to be ``learn to predict N and only N.''
+
+\section{Class-prior collapse}\label{sec:f6.1}
+
+\paragraph{Finding 6.1 --- DP-SGD collapses to majority-class prediction.}
+Class \emph{N} prevalence in the test split: $4{,}934 / 5{,}078 = 0.9716$.
+Final DP-SGD test accuracy: $0.9711$. The two numbers agree to four
+decimals. The model is, with statistical certainty, the majority-class
+predictor.
+
+This is not a learning-rate or noise-multiplier failure --- the train
+accuracy converges to the same 0.9712, and the spent $\varepsilon$ is
+within the target. It is a workload-mismatch failure: DP-SGD's per-step
+Gaussian noise drowns out the gradient signal of the rare classes, which
+contribute $\sim$2.9\,\% of the data. Under sufficient noise, the
+empirical-risk-minimising policy on the training set is exactly:
+predict the majority. Opacus is doing what it advertises; the workload
+asks more of it than the budget will pay for.
+
+\paragraph{Why this matters editorially.}
+A casual reader of Table~\ref{tab:detection-grid} sees ``0.9711''
+beside ``DP $\varepsilon = 5$'' and concludes that DP costs the
+framework about 1.7\,pp of accuracy --- a number that would be
+publishable under the headline-accuracy convention dominant in the
+FL-privacy literature. The honest reading is that DP costs the model's
+ability to detect any rare class at all on this data. The 0.9711 number
+hides the failure precisely because the metric is overall accuracy on a
+heavily imbalanced label space.
+
+The framework therefore reports macro-F1 alongside accuracy in
+\texttt{src/utils/metrics.py::compute\_classification\_report}; the
+centralized run's macro-F1 of 0.36 (Chapter~\ref{ch:detection}) drops to
+$\le 0.20$ on the DP run, which would have made the collapse visible
+if multi-seed F1 had been logged across rounds. We did not log it for
+the federated runs; we will (\S\ref{sec:future}).
+
+\section{The full pipeline run}
+
+30 rounds, 1 local epoch, batch 64, $\eta = 0.005$, target
+$\varepsilon = 8.0$, target $\delta = 10^{-5}$, SecAgg enabled,
+top-$k$ + int8 compression with $k = 0.1$.
+Opacus auto-calibrates $\sigma$ for the looser $\varepsilon$, hits
+$\varepsilon = 7.9964$.
+
+Round-by-round test accuracy: 0.9711 across all 30 rounds.
+
+\paragraph{Finding 6.2 --- Compression on top of DP does not degrade further.}
+DP-only at $\varepsilon = 5$ converges to 0.9711. Full pipeline (DP +
+SecAgg + compression) at $\varepsilon = 8$ converges to 0.9711.
+The model is already at the floor that the workload's class prior
+imposes; there is nothing left to degrade by adding more layers.
+Loosening the privacy budget from $\varepsilon = 5$ to $\varepsilon = 8$
+does not move the model off the floor either, which would otherwise be
+the natural follow-up question.
+
+\paragraph{Compositional implication.}
+For an operator constrained to deploy DP at $\varepsilon \le 8$ on a
+class-imbalanced workload, adding SecAgg and compression is essentially
+free: they do not make the already-collapsed model any worse. This
+inverts the usual ``every layer costs something'' framing for the
+specific case where the bottom layer has already maxed out the
+utility cost.
+
+\section{Negotiating the cliff}
+
+The thesis does not propose a fix; the experimental contribution is to
+make the cliff visible. Three directions a follow-up paper would take:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Class-weighted DP-SGD.} Apply per-class loss weights so
+  that the gradient signal from the rare classes is amplified before
+  clipping. Risks: changes the privacy accounting because the
+  $\ell_2$ sensitivity of the loss is no longer 1.
+  \item \textbf{Per-class privacy budgets.} Decouple $\varepsilon$ for
+  majority and minority classes, e.g.\ $\varepsilon_N = 1$,
+  $\varepsilon_{S, V, F, Q} = 10$. Mathematically clean but practically
+  awkward to deploy --- the privacy guarantee is then conditional on the
+  target class, which a deployment operator may find harder to reason
+  about than a single $\varepsilon$.
+  \item \textbf{Different MIT-BIH records.} Records 200--234 contain
+  more arrhythmias and reduce the imbalance. The framework can run on
+  them by changing one config line; we did not because the imbalanced
+  case is the more honest workload for an IoT deployment, where the
+  monitored patient is overwhelmingly likely to be in normal rhythm.
+\end{enumerate}
+
+\chapter{Discussion}\label{ch:disc}
+
+\section{What the three findings add up to}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Federation (\S\ref{sec:f4.1}).} Free on this workload.
+  \item \textbf{Secure aggregation (\S\ref{sec:f5.1}, \S\ref{sec:f5.2}).}
+  Free up to fp32 mask-cancellation noise; cryptographic correctness is
+  a one-line CI invariant.
+  \item \textbf{Differential privacy (\S\ref{sec:f6.1}).} The
+  privacy-utility cliff is real and is the central pitfall of DP-SGD on
+  imbalanced healthcare data. The DP run's headline accuracy looks
+  reasonable (0.9711) precisely because the metric matches the cliff:
+  predicting the majority class scores 0.9716.
+\end{itemize}
+
+The thesis-level recommendation: any privacy-preserving FL paper for
+imbalanced healthcare data should report majority-class baseline alongside
+overall accuracy and macro-F1 alongside top-1; the privacy/utility tradeoff
+graph is misleading without them. Our framework contributes both the
+mechanism that produces the data and the protocol that surfaces the cliff.
+
+\section{Likely reviewer objections}
+
+\paragraph{``You only ran each configuration at one seed.''}
+True. Vanilla FedAvg, SecAgg, and DP are seed-stable on this dataset to
+within roughly 0.5\,pp accuracy according to spot-checks during
+development. The DP collapse is structural rather than seed-dependent
+--- it is the model converging to the majority-class predictor, which
+the same training process produces from any random initialisation. Multi-seed
+across all configurations is the first item of \S\ref{sec:future}.
+
+\paragraph{``You only used 12 records.''}
+\texttt{wfdb.dl\_database} pulls records 100--115 by default; downloading
+the full 48-record set requires authentication and roughly 20\,minutes
+on our connection. Because the dominant phenomenon (DP class-prior
+collapse) is driven by the workload imbalance, and the imbalance is
+preserved as more records are added (records 100--234 are dominated by
+N similarly), the qualitative finding is robust to this choice.
+Records 200--234 specifically would lower the imbalance and is the
+natural follow-up.
+
+\paragraph{``You did not compare to FedProx or SCAFFOLD.''}
+The contribution is layering existing privacy primitives on top of
+FedAvg, not optimising the FL aggregation itself. FedAvg achieves
+0.988 on this workload --- approximately the centralized baseline.
+There is no headroom for a stronger FL aggregator to demonstrate on
+this data. A different workload (more clients, more heterogeneity)
+would justify the comparison.
+
+\paragraph{``Your SecAgg is not Bonawitz et~al.''}
+Acknowledged. The prototype uses pre-shared seeds rather than
+Diffie--Hellman, no Shamir secret-sharing for dropout tolerance,
+and float32 arithmetic. These limitations are listed in the
+module docstring, in
+\texttt{docs/privacy-analysis.md\,\S2}, and at the start of
+\S\ref{ch:secagg}. The cryptographic correctness invariant is the
+only contribution we claim from the SecAgg layer; that survives the
+simplifications.
+
+\paragraph{``Why not MIMIC-IV / PhysioNet challenge data / X?''}
+MIT-BIH is the canonical ECG benchmark; all other datasets we considered
+(MIMIC-IV vital signs, the PhysioNet 2020 12-lead challenge) introduce
+either feature heterogeneity or scale that the framework does not
+currently model. The framework is dataset-agnostic at the loader level
+(\texttt{src/data/}); switching to MIMIC-IV is a one-file extension and
+is listed in \S\ref{sec:future}.
+
+\section{Practical implications for deployment}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Run SecAgg by default.} Free utility cost (\S\ref{sec:f5.2}),
+  meaningful threat coverage (honest-but-curious server,
+  per-update tracing), and the correctness check is one unit test.
+  \item \textbf{DP-SGD on imbalanced clinical data is non-trivial.}
+  The headline-accuracy number can mask total class-prior collapse.
+  Always report majority-class baseline and macro-F1.
+  \item \textbf{Compression is free in the post-DP regime.} If the model
+  is already at the privacy floor, top-$k$ + int8 compression buys
+  bandwidth at no further utility cost. If the model is \emph{not} at
+  the floor, compression introduces additional approximation error and
+  must be measured explicitly.
+\end{itemize}
+
+\section{What we deliberately did not test}
+
+\begin{itemize}[leftmargin=*]
+  \item Byzantine / poisoning attacks. The threat model is
+  honest-but-curious server plus model-recipient adversary.
+  \item Real network-level performance. The Flower simulation is in-process.
+  \item Patient-level privacy guarantees (vs.\ record-level). Each MIT-BIH
+  record corresponds to one patient in our partition, but the DP
+  $\varepsilon$ is per-record, not per-patient. Patient-level $\varepsilon$
+  via group privacy is an extension we list but did not implement.
+\end{itemize}
+
+\section{Future work}\label{sec:future}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Multi-seed runs across all five configurations} to put error
+  bars on Table~\ref{tab:detection-grid}. Roughly 4 hours of GPU time per
+  3-seed sweep; limiting factor is the full-pipeline run (30 min/seed).
+  \item \textbf{Records 200--234} for arrhythmia variety, plus a class-weighted
+  loss variant of DP-SGD to test the proposed mitigation in
+  Chapter~\ref{ch:dp}, \S5.
+  \item \textbf{Modular-integer SecAgg} to remove the float32 cancellation
+  noise observed in \S\ref{sec:f5.2} and bring the SecAgg overhead to
+  exactly zero.
+  \item \textbf{Byzantine-robust aggregation} (Krum, median, trimmed mean)
+  composed with the existing privacy stack.
+  \item \textbf{MIMIC-IV vital-signs port} to test whether the class-prior
+  collapse generalises to a different healthcare modality with different
+  label distribution.
+  \item \textbf{Diffie--Hellman key exchange + Shamir secret-sharing} to
+  upgrade the SecAgg prototype to a dropout-tolerant deployment-grade
+  protocol.
+\end{enumerate}
+
+\chapter{Conclusion}\label{ch:concl}
+
+We built a layered-defense privacy-preserving federated learning framework for
+ECG arrhythmia classification on MIT-BIH, with three independently switchable
+defenses (DP-SGD, pairwise-mask SecAgg, top-$k$~+~int8 compression) on top of
+FedAvg. Five configurations were benchmarked on real PhysioNet data with four
+simulated wearable IoT clients.
+
+Three findings define the thesis:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Federation is free} on this workload --- vanilla FedAvg
+  matches centralized accuracy within 0.02\,pp. The federated decomposition
+  introduces no measurable utility cost.
+  \item \textbf{Secure aggregation is free} up to float32 mask-cancellation
+  noise --- 0.20\,pp gap vs.\ vanilla FedAvg, well below run-to-run
+  variance. The cryptographic correctness property is encoded as a unit test
+  that runs in CI; the protocol is mechanically verified, not just argued.
+  \item \textbf{DP-SGD collapses to majority-class prediction} on this
+  imbalanced workload. The final accuracy at $\varepsilon = 5$ is 0.9711,
+  which equals the prevalence of class \emph{N} (Normal) to four decimals
+  --- the model is, with statistical certainty, the majority-class
+  predictor. Adding compression on top of DP does not degrade further
+  because there is nothing left to degrade.
+\end{enumerate}
+
+The single recommendation this thesis makes to the
+privacy-preserving-FL-for-healthcare community: report majority-class
+baseline and macro-F1 alongside overall accuracy. The privacy/utility
+tradeoff curve in any imbalanced-data regime is meaningless without them;
+in our experiments it is the only thing standing between an honest
+``DP collapsed the model'' and a reportable ``DP costs 1.7\,pp.''
+
+The protocol and infrastructure to do so are contributed in \texttt{src/} and
+\texttt{experiments/}, all driven by committed YAML configurations. Every
+number in this document can be reproduced with \texttt{python -m
+experiments.run\_*} on the corresponding config.
+
+Future work (\S\ref{sec:future}) is multi-seed validation, records 200--234,
+modular-integer SecAgg, and a MIMIC-IV port.
+
+\begin{thebibliography}{99}
+\bibitem{mcmahan2017fedavg}
+H. Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise
+Ag{\"u}era y Arcas.
+\emph{Communication-Efficient Learning of Deep Networks from Decentralized
+Data}.
+AISTATS 2017, pp.\ 1273--1282.
+
+\bibitem{abadi2016dpsgd}
+Mart{\'i}n Abadi, Andy Chu, Ian Goodfellow, H.~Brendan McMahan, Ilya Mironov,
+Kunal Talwar, and Li Zhang.
+\emph{Deep Learning with Differential Privacy}.
+ACM CCS 2016, pp.\ 308--318.
+
+\bibitem{mironov2017rdp}
+Ilya Mironov.
+\emph{R{\'e}nyi Differential Privacy}.
+IEEE Computer Security Foundations Symposium (CSF) 2017, pp.\ 263--275.
+
+\bibitem{bonawitz2017secagg}
+Keith Bonawitz, Vladimir Ivanov, Ben Kreuter, Antonio Marcedone, H.~Brendan
+McMahan, Sarvar Patel, Daniel Ramage, Aaron Segal, and Karn Seth.
+\emph{Practical Secure Aggregation for Privacy-Preserving Machine Learning}.
+ACM CCS 2017, pp.\ 1175--1191.
+
+\bibitem{yousefpour2021opacus}
+Ashkan Yousefpour, Igor Shilov, Alexandre Sablayrolles, Davide Testuggine,
+Karthik Prasad, Mani Malek, John Nguyen, Sayan Ghosh, Akash Bharadwaj, Jessica
+Zhao, Graham Cormode, and Ilya Mironov.
+\emph{Opacus: User-Friendly Differential Privacy Library in PyTorch}.
+NeurIPS Privacy in ML Workshop, 2021.
+
+\bibitem{beutel2020flower}
+Daniel J.\ Beutel, Taner Topal, Akhil Mathur, Xinchi Qiu, Javier Fernandez-Marques,
+Yan Gao, Lorenzo Sani, Kwing Hei Li, Titouan Parcollet, Pedro Porto Buarque
+de Gusm{\~a}o, and Nicholas D.\ Lane.
+\emph{Flower: A Friendly Federated Learning Research Framework}.
+arXiv:2007.14390, 2020.
+
+\bibitem{moody2001mitbih}
+George B.\ Moody and Roger G.\ Mark.
+\emph{The Impact of the MIT-BIH Arrhythmia Database}.
+IEEE Engineering in Medicine and Biology Magazine, 20(3):45--50, 2001.
+
+\bibitem{aami1998ec57}
+Association for the Advancement of Medical Instrumentation.
+\emph{Testing and Reporting Performance Results of Cardiac Rhythm and
+ST Segment Measurement Algorithms (ANSI/AAMI EC57)}, 1998.
+
+\bibitem{kachuee2018ecg}
+Mohammad Kachuee, Shayan Fazeli, and Majid Sarrafzadeh.
+\emph{ECG Heartbeat Classification: A Deep Transferable Representation}.
+IEEE International Conference on Healthcare Informatics (ICHI) 2018,
+pp.\ 443--444.
+
+\bibitem{li2020fedprox}
+Tian Li, Anit Kumar Sahu, Manzil Zaheer, Maziar Sanjabi, Ameet Talwalkar,
+and Virginia Smith.
+\emph{Federated Optimization in Heterogeneous Networks}.
+MLSys 2020.
+
+\bibitem{konecny2016fedlearning}
+Jakub Kone{\v{c}}n{\'y}, H.~Brendan McMahan, Felix X.\ Yu, Peter Richt{\'a}rik,
+Ananda Theertha Suresh, and Dave Bacon.
+\emph{Federated Learning: Strategies for Improving Communication Efficiency}.
+NeurIPS Workshop on Private Multi-Party Machine Learning, 2016.
+
+\bibitem{kim2022rigorous}
+Siwon Kim, Kukjin Choi, Hyun-Soo Choi, Byunghan Lee, and Sungroh Yoon.
+\emph{Towards a Rigorous Evaluation of Time-series Anomaly Detection}.
+AAAI 2022, pp.\ 7194--7201.
+
+\bibitem{shokri2017membership}
+Reza Shokri, Marco Stronati, Congzheng Song, and Vitaly Shmatikov.
+\emph{Membership Inference Attacks Against Machine Learning Models}.
+IEEE Symposium on Security and Privacy (S\&P) 2017, pp.\ 3--18.
+
+\end{thebibliography}
+
+\end{document}

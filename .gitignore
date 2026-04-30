@@ -90,3 +90,12 @@ secrets.yaml
 
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
+
+# LaTeX build artifacts (PDF is committed; these are not)
+docs/thesis/*.aux
+docs/thesis/*.log
+docs/thesis/*.out
+docs/thesis/*.toc
+docs/thesis/*.fls
+docs/thesis/*.fdb_latexmk
+docs/thesis/*.synctex.gz
