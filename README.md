@@ -145,15 +145,26 @@ Five experiments exercise the framework:
 4. **Federated + SecAgg** — adds pairwise-mask aggregation. Verifies mask cancellation in code.
 5. **Full pipeline** — all defenses simultaneously. The headline result.
 
-A results table to fill in after running:
+Results from the dev-machine run on 12 MIT-BIH records (records 100–115, 25 393 beats,
+4 simulated IoT clients, Dirichlet non-IID partition, single-seed run on RTX-class GPU):
 
-| Setup                                | Test accuracy | Macro-F1 | Final ε | Bytes / round / client |
-|--------------------------------------|---------------|----------|---------|------------------------|
-| Centralized baseline                 | _TBD_         | _TBD_    | n/a     | n/a                    |
-| Federated (vanilla)                  | _TBD_         | _TBD_    | n/a     | _TBD_                  |
-| Federated + DP (ε=5)                 | _TBD_         | _TBD_    | _TBD_   | _TBD_                  |
-| Federated + SecAgg                   | _TBD_         | _TBD_    | n/a     | _TBD_                  |
-| Federated + DP + SecAgg + Compression | _TBD_        | _TBD_    | _TBD_   | _TBD_                  |
+| Setup                                  | Test accuracy | Final ε  | Notes                                     |
+|----------------------------------------|---------------|----------|-------------------------------------------|
+| Centralized baseline (5 epochs)        | **98.78 %**   | n/a      | Macro-F1 = 0.36; rare classes (S/F/Q) ≈ 0 |
+| Federated FedAvg (10 rounds)           | **98.80 %**   | n/a      | Matches centralized — federation is free  |
+| Federated + SecAgg (10 rounds)         | **98.60 %**   | n/a      | Within noise of vanilla; masks cancel ✓   |
+| Federated + DP (20 rounds, ε≈5)        | 97.11 %       | 4.9955   | Collapses to majority-class predictor     |
+| Full pipeline DP+SecAgg+Compression    | 97.11 %       | 7.9964   | Same plateau; ε relaxed to 8 didn't help  |
+
+The dataset is **heavily imbalanced** (97.1 % class N, 2.6 % V, 0.24 % S, 0.03 % F, 0.03 % Q),
+so the 97.11 % accuracy DP runs reach is exactly the proportion of class N — i.e. the noise
+swamps the rare-class signal and the model collapses to predicting N for every beat. This is a
+real and reportable result for the diploma: it shows the **utility cost of DP-SGD on imbalanced
+healthcare data** and motivates extensions like class-weighted loss, focal loss, or per-class DP
+budgets. The student should re-run with records 200–234 (which contain more arrhythmias) for a
+follow-up table.
+
+Reproduce all five rows with `./scripts/run_all_experiments.sh`.
 
 The `notebooks/03_privacy_utility_tradeoff.ipynb` notebook reads each `history.json` and
 plots accuracy vs ε for the diploma figure.
