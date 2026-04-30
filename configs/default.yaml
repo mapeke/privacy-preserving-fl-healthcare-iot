@@ -1,0 +1,53 @@
+# Default configuration for vanilla federated learning (no privacy defenses).
+# Used by experiments/run_federated.py and as the base for all other configs.
+
+experiment:
+  name: vanilla_fedavg
+  output_dir: results/vanilla_fedavg
+  seed: 42
+
+data:
+  source: mitbih          # mitbih | synthetic
+  cache_dir: data/cache
+  records: [100, 101, 103, 105, 106, 108, 109, 111, 112, 113, 114, 115]
+  window_size: 360        # samples per ECG beat window (~1 second @ 360 Hz)
+  num_classes: 5          # AAMI 5-class scheme (N, S, V, F, Q)
+  test_fraction: 0.2
+
+partitioning:
+  scheme: dirichlet       # iid | dirichlet
+  dirichlet_alpha: 0.5    # lower = more non-IID; ignored when scheme=iid
+  min_samples_per_client: 50
+
+federation:
+  num_clients: 4
+  clients_per_round: 4    # all clients participate every round
+  num_rounds: 10
+  local_epochs: 2
+  local_batch_size: 32
+
+model:
+  name: ecg_cnn           # ecg_cnn | lightweight
+  dropout: 0.3
+
+optimization:
+  optimizer: sgd
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+
+privacy:
+  differential_privacy:
+    enabled: false
+  secure_aggregation:
+    enabled: false
+  compression:
+    enabled: false
+
+evaluation:
+  evaluate_every: 1       # evaluate global model every N rounds
+  metrics: [accuracy, macro_f1, per_class_f1]
+
+logging:
+  level: INFO
+  log_to_file: true

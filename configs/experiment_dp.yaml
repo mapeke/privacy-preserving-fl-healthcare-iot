@@ -1,0 +1,28 @@
+# Federated learning with differential privacy (DP-SGD via Opacus).
+# Inherits all keys from default.yaml unless overridden here.
+
+experiment:
+  name: federated_dp
+  output_dir: results/federated_dp
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 5.0
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0      # gradient clipping threshold C
+    noise_multiplier: null  # null = auto-calibrate to hit target_epsilon
+    accountant: rdp         # rdp | gdp
+  secure_aggregation:
+    enabled: false
+  compression:
+    enabled: false
+
+# DP-SGD typically needs more rounds and a smaller LR to converge under noise.
+federation:
+  num_rounds: 20
+  local_epochs: 1
+  local_batch_size: 64       # larger batch -> better signal-to-noise
+
+optimization:
+  learning_rate: 0.005

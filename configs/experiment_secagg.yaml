@@ -1,0 +1,16 @@
+# Federated learning with secure aggregation (no DP, no compression).
+# Used to verify the masking protocol cancels exactly and to measure its overhead.
+
+experiment:
+  name: federated_secagg
+  output_dir: results/federated_secagg
+
+privacy:
+  differential_privacy:
+    enabled: false
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32     # PRG seed size used to derive mask material
+    fixed_point_bits: 16    # quantization for fixed-point mask arithmetic
+  compression:
+    enabled: false

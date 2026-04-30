@@ -1,0 +1,31 @@
+# Full pipeline: DP-SGD + Secure Aggregation + Compression.
+# This is the headline experiment for the diploma.
+
+experiment:
+  name: federated_full_pipeline
+  output_dir: results/federated_full_pipeline
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 8.0      # slightly looser to compensate for compression noise
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0
+    accountant: rdp
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32
+    fixed_point_bits: 16
+  compression:
+    enabled: true
+    method: top_k_quantize   # top_k_quantize | quantize_only | top_k_only
+    top_k_ratio: 0.1         # keep top 10% of weights by magnitude per layer
+    quant_bits: 8
+
+federation:
+  num_rounds: 30
+  local_epochs: 1
+  local_batch_size: 64
+
+optimization:
+  learning_rate: 0.005
