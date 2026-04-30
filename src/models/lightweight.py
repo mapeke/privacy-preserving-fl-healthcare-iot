@@ -23,7 +23,7 @@ class _DepthwiseSeparable1d(nn.Module):
         )
         self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1)
         self.norm = nn.GroupNorm(num_groups=min(4, out_channels), num_channels=out_channels)
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.norm(self.pointwise(self.depthwise(x))))
@@ -41,7 +41,7 @@ class LightweightEcgCNN(nn.Module):
         self.stem = nn.Sequential(
             nn.Conv1d(1, 8, kernel_size=7, padding=3),
             nn.GroupNorm(2, 8),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.MaxPool1d(2),
         )
         self.body = nn.Sequential(

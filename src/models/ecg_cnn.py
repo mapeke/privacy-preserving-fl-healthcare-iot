@@ -19,10 +19,10 @@ class _ConvBlock(nn.Module):
         self.block = nn.Sequential(
             nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=2),
             nn.GroupNorm(groups, out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv1d(out_channels, out_channels, kernel_size=5, padding=2),
             nn.GroupNorm(groups, out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.MaxPool1d(kernel_size=2),
         )
 
@@ -50,7 +50,7 @@ class EcgCNN(nn.Module):
             nn.Flatten(),
             nn.Dropout(dropout),
             nn.Linear(64, 32),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, num_classes),
         )
