@@ -1,0 +1,92 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+parts/
+sdist/
+wheels/
+share/python-wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtualenv ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- Type checkers / linters ---
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# --- Editors / IDEs ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Project-specific ---
+# Raw + cached datasets (MIT-BIH downloads)
+data/raw/
+data/cache/
+data/processed/
+*.dat
+*.hea
+*.atr
+
+# Training artifacts
+results/
+runs/
+checkpoints/
+logs/
+*.log
+*.pt
+*.pth
+*.ckpt
+
+# Flower simulation artifacts
+.flwr/
+
+# Local secrets / configs
+.env
+.env.local
+secrets.yaml
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json

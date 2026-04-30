@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "privacy-preserving-fl-healthcare-iot"
+version = "0.1.0"
+description = "Privacy-Preserving Federated Learning Framework for IoT-Based Healthcare Systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "mapeke", email = "mapeke82@gmail.com" }
+]
+keywords = [
+    "federated-learning",
+    "differential-privacy",
+    "secure-aggregation",
+    "healthcare",
+    "iot",
+    "ecg",
+    "mit-bih",
+    "privacy-preserving-machine-learning"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Repository = "https://github.com/mapeke/privacy-preserving-fl-healthcare-iot"
+Issues = "https://github.com/mapeke/privacy-preserving-fl-healthcare-iot/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
