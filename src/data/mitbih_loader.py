@@ -110,9 +110,13 @@ def _load_real_mitbih(
 
     for rec in records:
         rec_str = f"{rec:03d}"
+        local_path = cache_dir / f"{rec_str}.dat"
+        if not local_path.exists():
+            logger.info("Downloading MIT-BIH record %s -> %s", rec_str, cache_dir)
+            wfdb.dl_database("mitdb", str(cache_dir), records=[rec_str], annotators=["atr"])
         logger.info("Loading MIT-BIH record %s", rec_str)
-        record = wfdb.rdrecord(rec_str, pn_dir="mitdb", pn_cache=str(cache_dir))
-        ann = wfdb.rdann(rec_str, "atr", pn_dir="mitdb", pn_cache=str(cache_dir))
+        record = wfdb.rdrecord(str(cache_dir / rec_str))
+        ann = wfdb.rdann(str(cache_dir / rec_str), "atr")
 
         signal = record.p_signal[:, 0].astype(np.float32)  # lead II
         # Per-record z-score normalization so all clients see comparable amplitudes.
