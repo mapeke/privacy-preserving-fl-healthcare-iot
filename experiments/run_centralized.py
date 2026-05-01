@@ -31,9 +31,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--output-dir", default="results/centralized")
     args = parser.parse_args()
 
-    art = build_experiment(args.config, overrides={"experiment.output_dir": "results/centralized"})
+    art = build_experiment(args.config, overrides={"experiment.output_dir": args.output_dir})
 
     pooled = ConcatDataset([loader.dataset for loader in art.train_loaders])
     pooled_loader = DataLoader(
