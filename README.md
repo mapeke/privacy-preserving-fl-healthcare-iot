@@ -161,13 +161,51 @@ so the 97.11 % accuracy DP runs reach is exactly the proportion of class N — i
 swamps the rare-class signal and the model collapses to predicting N for every beat. This is a
 real and reportable result for the diploma: it shows the **utility cost of DP-SGD on imbalanced
 healthcare data** and motivates extensions like class-weighted loss, focal loss, or per-class DP
-budgets. The student should re-run with records 200–234 (which contain more arrhythmias) for a
-follow-up table.
+budgets.
 
 Reproduce all five rows with `./scripts/run_all_experiments.sh`.
 
 The `notebooks/03_privacy_utility_tradeoff.ipynb` notebook reads each `history.json` and
 plots accuracy vs ε for the diploma figure.
+
+### Follow-up: records 200–234
+
+The thesis's third finding (DP collapses to majority-class) is *dataset-specific*. To test
+this, the same five experiments were re-run on MIT-BIH records 200–234 — 25 records,
+**61 818 beats**, with substantially more arrhythmia variety:
+
+| Class | records 100–115 | records 200–234 |
+|-------|-----------------|-----------------|
+| N     | 97.09 %         | 82.08 %         |
+| S     | 0.24 %          | 4.19 %          |
+| V     | 2.60 %          | 9.53 %          |
+| F     | 0.03 %          | 1.28 %          |
+| Q     | 0.03 %          | 2.93 %          |
+
+Same hyperparameters as the original table — no per-dataset tuning:
+
+| Setup                                  | 100–115 acc | 200–234 acc | 200–234 ε | vs majority N (82.08 %) |
+|----------------------------------------|-------------|-------------|-----------|-------------------------|
+| Centralized baseline (5 epochs)        | 98.78 %     | **93.89 %** | n/a       | +11.81 pp; macro-F1 0.69 (was 0.36) |
+| Federated FedAvg (10 rounds)           | 98.80 %     | **96.36 %** | n/a       | +14.28 pp; federation still free |
+| Federated + SecAgg (10 rounds)         | 98.60 %     | **95.58 %** | n/a       | +13.50 pp; mask-cancellation noise ~0.78 pp |
+| Federated + DP (20 rounds, ε≈5)        | 97.11 %     | **88.45 %** | 4.9964    | **+6.37 pp** — DP retains signal |
+| Full pipeline DP+SecAgg+Compression    | 97.11 %     | **81.76 %** | 7.9935    | −0.32 pp — collapses to majority |
+
+Two refinements to the thesis findings come out of this:
+
+1. **DP-only does not always collapse to majority-class.** On records 100–115 the 97.11 %
+   plateau equalled class-N prevalence exactly; on records 200–234 the 88.45 % accuracy is
+   6.4 pp above the majority baseline, meaning DP-SGD genuinely learned the more frequent
+   rare-class signal. The "DP collapse" finding is a property of *extreme* imbalance, not of
+   DP-SGD per se.
+2. **Full-pipeline compression undoes that signal.** The 30-round full-pipeline run on
+   records 200–234 trains noisily (accuracy oscillates 65 %–86 %) and ends at the majority
+   baseline (81.76 %). Top-k+int8 compression on top of DP-SGD's already-noisy gradients
+   appears to push the regime back across the cliff. ε relaxed from 5 → 8 was not enough
+   to compensate.
+
+Reproduce all five rows with the configs in [`configs/followup_records200/`](configs/followup_records200/).
 
 ## Tests
 
