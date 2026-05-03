@@ -42,6 +42,12 @@ workload, with final accuracy equal to the prevalence of class \emph{N} to
 two decimals --- a privacy/utility cliff that is invisible if one only
 reports overall accuracy. Adding compression on top of DP does not degrade
 the model further, because there is nothing left to degrade.
+A follow-up run on MIT-BIH records 200--234 (where the imbalance is moderate,
+82\,\% N rather than 97\,\%) shows that this collapse is dataset-conditional:
+DP-SGD alone retains a $+6.37$\,pp signal over the majority baseline on that
+slice, but the full pipeline (DP + SecAgg + compression at $\varepsilon = 8$)
+still collapses to majority. The cliff is real; its location is a property of
+the workload's class balance.
 Every number in the thesis is reproducible from a committed YAML configuration via
 \texttt{python -m experiments.run\_*}.
 \end{abstract}
@@ -113,7 +119,11 @@ decimals. The full-pipeline run (DP + SecAgg + compression) at
 $\varepsilon \approx 8$ converges to the \emph{same} 0.9711. We argue
 (Chapter~\ref{ch:dp}, \S\ref{sec:f6.1}) that this is a class-prior collapse,
 not a learning curve, and that it is the single most consequential and least
-discussed failure mode of DP-SGD on realistic clinical data.
+discussed failure mode of DP-SGD on realistic clinical data. A follow-up on
+records 200--234 (\S\ref{sec:f6.3}) confirms the diagnostic generalises but
+its severity is class-balance-conditional: on moderate imbalance DP-SGD
+retains a measurable rare-class signal, while the full pipeline still
+collapses.
 
 \section{Structure}
 
@@ -143,11 +153,12 @@ and limitations. Chapter~\ref{ch:concl} concludes.
   the released global model (Appendix \texttt{docs/threat-model.md}). Robust
   aggregation (Krum, median, trimmed mean) is listed as future work
   (\S\ref{sec:future}).
-  \item \textbf{We do not use MIT-BIH records~200--234} (which contain more
-  arrhythmia variety) despite their being more useful for the rare-class
-  classifier we end up unable to train. Records 100--115 are what
-  \texttt{wfdb.dl\_database} pulls down by default; we keep them and discuss the
-  consequence honestly (Chapter~\ref{ch:dp}, \S\ref{sec:f6.1}).
+  \item \textbf{Our primary experiments use MIT-BIH records 100--115},
+  which \texttt{wfdb.dl\_database} pulls down by default and which exhibit
+  the heavy-imbalance regime (97.1\,\% N) that drives the central finding.
+  A follow-up section (Chapter~\ref{ch:dp}, \S\ref{sec:f6.3}) re-runs all
+  five experiments on records 200--234 (more arrhythmia variety, 82.1\,\% N)
+  to test whether the DP class-prior collapse is dataset-conditional.
 \end{itemize}
 
 \chapter{Background}\label{ch:bg}
@@ -622,7 +633,7 @@ inverts the usual ``every layer costs something'' framing for the
 specific case where the bottom layer has already maxed out the
 utility cost.
 
-\section{Negotiating the cliff}
+\section{Negotiating the cliff}\label{sec:negotiating}
 
 The thesis does not propose a fix; the experimental contribution is to
 make the cliff visible. Three directions a follow-up paper would take:
@@ -639,11 +650,115 @@ make the cliff visible. Three directions a follow-up paper would take:
   target class, which a deployment operator may find harder to reason
   about than a single $\varepsilon$.
   \item \textbf{Different MIT-BIH records.} Records 200--234 contain
-  more arrhythmias and reduce the imbalance. The framework can run on
-  them by changing one config line; we did not because the imbalanced
-  case is the more honest workload for an IoT deployment, where the
-  monitored patient is overwhelmingly likely to be in normal rhythm.
+  more arrhythmias and reduce the imbalance from 97.1\,\% N to
+  82.1\,\% N. We re-ran all five configurations on this slice
+  (\S\ref{sec:f6.3} below) without retuning, both to test whether the
+  cliff is dataset-conditional and to give the rare-class classifier a
+  fairer chance. The deployment workload (a wearable monitoring an
+  asymptomatic patient) is closer to the 100--115 imbalance than to
+  200--234, so the primary slice remains the more representative one.
 \end{enumerate}
+
+\section{Follow-up: records 200--234}\label{sec:f6.3}
+
+To test whether the DP class-prior collapse (\S\ref{sec:f6.1}) is a
+property of DP-SGD itself or of the workload's extreme imbalance, we
+re-ran all five experimental configurations on records 200--234 ---
+a 25-record slice with 61{,}818 beats and substantially more
+arrhythmia variety. No hyperparameters were retuned; configs are
+\texttt{configs/followup\_records200/\{default, experiment\_dp,
+experiment\_secagg, experiment\_full\}.yaml}.
+Table~\ref{tab:class-balance-200} contrasts the two slices' class
+distributions; Table~\ref{tab:followup-grid} reports final accuracies
+side by side with the original Table~\ref{tab:detection-grid}.
+
+\begin{table}[h]
+  \centering
+  \caption{AAMI class distribution on records 100--115 (the primary
+  slice, 25{,}393 beats) and records 200--234 (the follow-up,
+  61{,}818 beats). The follow-up reduces the majority-class share
+  from 97.1\,\% to 82.1\,\% and gives all four rare classes between
+  1\,\% and 10\,\% of the data each.}
+  \label{tab:class-balance-200}
+  \begin{tabular}{lrr}
+    \toprule
+    Class & 100--115 share & 200--234 share \\
+    \midrule
+    \emph{N} (normal)              & 97.10\,\% & 82.08\,\% \\
+    \emph{S} (supraventricular)    &  0.24\,\% &  4.19\,\% \\
+    \emph{V} (ventricular ectopic) &  2.60\,\% &  9.53\,\% \\
+    \emph{F} (fusion)              &  0.03\,\% &  1.28\,\% \\
+    \emph{Q} (unknown / paced)     &  0.03\,\% &  2.93\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \caption{Same five experiments, records 100--115 vs.\ records
+  200--234, same hyperparameters in both columns. The majority-class
+  baseline (predict-all-N) is 97.16\,\% on 100--115 and 82.08\,\% on
+  200--234; the right-hand column is the gap from that baseline on
+  the follow-up slice.}
+  \label{tab:followup-grid}
+  \begin{tabular}{lrrr}
+    \toprule
+    Configuration & 100--115 acc & 200--234 acc & vs.\ majority \\
+    \midrule
+    Centralized (5 epochs)              & 0.9878 & \textbf{0.9389} & $+11.81$\,pp \\
+    FedAvg (10 rounds)                  & 0.9880 & \textbf{0.9636} & $+14.28$\,pp \\
+    FedAvg + SecAgg (10 rounds)         & 0.9860 & \textbf{0.9558} & $+13.50$\,pp \\
+    FedAvg + DP, $\varepsilon \approx 5$ (20 rounds)
+                                        & 0.9711 & \textbf{0.8845} & $+6.37$\,pp \\
+    Full pipeline, $\varepsilon \approx 8$ (30 rounds)
+                                        & 0.9711 & \textbf{0.8176} & $-0.32$\,pp \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Finding 6.3 --- The DP class-prior collapse is
+dataset-conditional.}
+On records 200--234, DP-SGD at $\varepsilon \approx 5$ converges to
+$0.8845$ test accuracy, $+6.37$\,pp above the $0.8208$ majority-class
+baseline. The model has \emph{not} collapsed: it is distinguishing
+rare-class beats. Compare to the original 100--115 result, where
+DP-SGD's $0.9711$ matched class-\emph{N} prevalence to four decimals.
+Finding 6.1 (\S\ref{sec:f6.1}) is therefore not a property of DP-SGD
+but a property of \emph{extreme} class imbalance composed with DP's
+per-step noise. The cliff exists; its location is workload-dependent.
+
+\paragraph{Finding 6.4 --- The full pipeline collapses on moderate
+imbalance too.}
+The full-pipeline run (DP + SecAgg + top-$k$ + int8 at $\varepsilon
+\approx 8$) on records 200--234 converges to $0.8176$, $0.32$\,pp
+\emph{below} the $0.8208$ majority-class baseline. Round-by-round
+accuracy oscillates between $\sim$65\,\% and $\sim$86\,\% over the
+30 rounds; the run does not stabilise. Top-$k$ + int8 compression on
+top of DP-SGD's already-noisy gradients appears to push the regime
+back across the cliff that DP-SGD alone clears on this dataset.
+Loosening the budget from $\varepsilon = 5$ (DP-only) to
+$\varepsilon = 8$ (full pipeline) is not enough to compensate ---
+the additional noise floor is the lossy compression, not the
+DP budget.
+
+\paragraph{What the follow-up changes editorially.}
+The Chapter~\ref{ch:dp} framing ``DP collapses on imbalanced
+healthcare data'' is true on records 100--115 but reads as a
+generalisation. The honest generalisation is: \emph{DP-SGD's
+signal-to-noise ratio degrades sharply when the rare-class share
+approaches the per-step noise floor; the cliff is observable but its
+location depends on both the budget and the workload imbalance.} The
+full pipeline crosses the cliff on both slices, which is the more
+generalisable finding the framework supports.
+
+\paragraph{What the follow-up does not change.}
+We do not retune hyperparameters per dataset --- the contribution is
+the relative shape across the privacy stack, not absolute accuracy on
+either slice. We do not claim records 200--234 is the ``right'' slice;
+the deployment workload (a wearable monitoring an asymptomatic
+patient) is closer to the 100--115 imbalance. Both slices are useful:
+100--115 surfaces the cliff at the dataset extreme, 200--234 shows
+where on the class-balance axis it sits.
 
 \chapter{Discussion}\label{ch:disc}
 
@@ -659,6 +774,13 @@ make the cliff visible. Three directions a follow-up paper would take:
   imbalanced healthcare data. The DP run's headline accuracy looks
   reasonable (0.9711) precisely because the metric matches the cliff:
   predicting the majority class scores 0.9716.
+  \item \textbf{Dataset dependence (\S\ref{sec:f6.3}).} Finding 3 is
+  conditional on \emph{extreme} class imbalance: on records 200--234
+  (82\,\% N rather than 97\,\% N) DP-SGD alone retains a $+6.37$\,pp
+  rare-class signal, while the full pipeline still collapses. The
+  cliff is a property of the workload composed with the privacy stack,
+  not of DP-SGD per se; the framework is what makes that property
+  visible.
 \end{itemize}
 
 The thesis-level recommendation: any privacy-preserving FL paper for
@@ -678,14 +800,14 @@ the same training process produces from any random initialisation. Multi-seed
 across all configurations is the first item of \S\ref{sec:future}.
 
 \paragraph{``You only used 12 records.''}
-\texttt{wfdb.dl\_database} pulls records 100--115 by default; downloading
-the full 48-record set requires authentication and roughly 20\,minutes
-on our connection. Because the dominant phenomenon (DP class-prior
-collapse) is driven by the workload imbalance, and the imbalance is
-preserved as more records are added (records 100--234 are dominated by
-N similarly), the qualitative finding is robust to this choice.
-Records 200--234 specifically would lower the imbalance and is the
-natural follow-up.
+The primary experiments use records 100--115 (the
+\texttt{wfdb.dl\_database} default). \S\ref{sec:f6.3} re-runs all
+five experiments on records 200--234 (25 records, 61{,}818 beats,
+82.1\,\% N) without retuning. The qualitative finding holds with one
+refinement: DP-SGD alone clears the cliff on records 200--234 but the
+full pipeline still collapses. The 12-record default is enough to
+\emph{surface} the cliff; the 25-record follow-up is what places it
+on the class-balance axis.
 
 \paragraph{``You did not compare to FedProx or SCAFFOLD.''}
 The contribution is layering existing privacy primitives on top of
@@ -747,9 +869,11 @@ is listed in \S\ref{sec:future}.
   \item \textbf{Multi-seed runs across all five configurations} to put error
   bars on Table~\ref{tab:detection-grid}. Roughly 4 hours of GPU time per
   3-seed sweep; limiting factor is the full-pipeline run (30 min/seed).
-  \item \textbf{Records 200--234} for arrhythmia variety, plus a class-weighted
-  loss variant of DP-SGD to test the proposed mitigation in
-  Chapter~\ref{ch:dp}, \S5.
+  \item \textbf{Class-weighted DP-SGD} to test the proposed mitigation
+  in \S\ref{sec:negotiating} on the records 200--234 slice, where
+  DP-SGD alone clears the cliff but the full pipeline does not.
+  Records 200--234 already lifted the rare-class signal; class-weighted
+  loss is the next dial.
   \item \textbf{Modular-integer SecAgg} to remove the float32 cancellation
   noise observed in \S\ref{sec:f5.2} and bring the SecAgg overhead to
   exactly zero.
@@ -786,7 +910,13 @@ Three findings define the thesis:
   which equals the prevalence of class \emph{N} (Normal) to four decimals
   --- the model is, with statistical certainty, the majority-class
   predictor. Adding compression on top of DP does not degrade further
-  because there is nothing left to degrade.
+  because there is nothing left to degrade. A follow-up on records
+  200--234 (\S\ref{sec:f6.3}) shows that the collapse is
+  \emph{dataset-conditional}: on moderate imbalance (82\,\% N) DP-SGD
+  alone retains a $+6.37$\,pp signal over the majority baseline, but
+  the full pipeline still collapses at $\varepsilon = 8$. The
+  sharpness of the cliff is a property of the workload imbalance; its
+  existence is a property of the privacy stack composition.
 \end{enumerate}
 
 The single recommendation this thesis makes to the
