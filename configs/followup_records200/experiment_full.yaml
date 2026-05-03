@@ -1,0 +1,31 @@
+# Follow-up full pipeline (DP + SecAgg + Compression) on records 200-234.
+# Mirrors configs/experiment_full.yaml.
+
+experiment:
+  name: followup_records200_full
+  output_dir: results/followup_records200/federated_full_pipeline
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 8.0
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0
+    accountant: rdp
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32
+    fixed_point_bits: 16
+  compression:
+    enabled: true
+    method: top_k_quantize
+    top_k_ratio: 0.1
+    quant_bits: 8
+
+federation:
+  num_rounds: 30
+  local_epochs: 1
+  local_batch_size: 64
+
+optimization:
+  learning_rate: 0.005

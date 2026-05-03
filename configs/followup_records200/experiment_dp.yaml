@@ -1,0 +1,29 @@
+# Follow-up DP-SGD run on records 200-234.
+# Mirrors configs/experiment_dp.yaml — same target_epsilon, max_grad_norm, and
+# round count. Inheritance picks up the records list from the sibling
+# default.yaml in this directory.
+
+experiment:
+  name: followup_records200_dp
+  output_dir: results/followup_records200/federated_dp
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 5.0
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0
+    noise_multiplier: null
+    accountant: rdp
+  secure_aggregation:
+    enabled: false
+  compression:
+    enabled: false
+
+federation:
+  num_rounds: 20
+  local_epochs: 1
+  local_batch_size: 64
+
+optimization:
+  learning_rate: 0.005

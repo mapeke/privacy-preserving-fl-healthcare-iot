@@ -1,0 +1,16 @@
+# Follow-up SecAgg run on records 200-234.
+# Mirrors configs/experiment_secagg.yaml.
+
+experiment:
+  name: followup_records200_secagg
+  output_dir: results/followup_records200/federated_secagg
+
+privacy:
+  differential_privacy:
+    enabled: false
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32
+    fixed_point_bits: 16
+  compression:
+    enabled: false
