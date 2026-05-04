@@ -1771,6 +1771,10 @@ is listed in \S\ref{sec:future}.
 
 \section{Practical implications for deployment}
 
+The framework's three findings translate into three concrete
+recommendations for any team operationalising privacy-preserving FL on
+healthcare data:
+
 \begin{itemize}[leftmargin=*]
   \item \textbf{Run SecAgg by default.} Free utility cost (\S\ref{sec:f5.2}),
   meaningful threat coverage (honest-but-curious server,
@@ -1785,17 +1789,97 @@ is listed in \S\ref{sec:future}.
   must be measured explicitly.
 \end{itemize}
 
+\paragraph{A configuration recipe.}
+Concretely, an operator deploying this framework on a wearable-IoT ECG
+classifier with $\sim$1000 devices and a target threat model matching
+A1--A4 (Chapter~\ref{ch:threat}) would set the configuration in
+Table~\ref{tab:deployment-config}. The reasoning behind each value is
+documented in the chapter referenced; the configuration is meant as a
+defensible starting point, not a final tuning.
+
+\begin{table}[h]
+  \centering
+  \caption{Suggested starting configuration for a privacy-preserving
+  FL deployment under threat model A1--A4. Each value links back to
+  the chapter that justifies it; the operator should re-tune
+  \texttt{target\_epsilon} per their target rare-class recall and
+  \texttt{top\_k\_ratio} per their bandwidth budget.}
+  \label{tab:deployment-config}
+  \begin{tabular}{llp{6.5cm}}
+    \toprule
+    Knob & Value & Justification \\
+    \midrule
+    \texttt{secagg.enabled}            & \texttt{true}    & Below-noise utility cost; covers A1--A3 (\S\ref{sec:f5.2}, \S\ref{ch:threat}) \\
+    \texttt{dp.target\_epsilon}        & 5.0--8.0         & Conventional moderate budget; relax to 8 if rare classes matter (\S\ref{sec:dpsgd-formal}) \\
+    \texttt{dp.target\_delta}          & $10^{-5}$        & $< 1/N$ for any $N \gtrsim 10^5$ (\S\ref{sec:dpsgd-formal}) \\
+    \texttt{dp.max\_grad\_norm} ($C$)  & 1.0              & Opacus default; matches observed gradient scale (\S\ref{sec:dpsgd-formal}) \\
+    \texttt{dp.accountant}             & \texttt{rdp}     & Tightest known bounds for Gaussian DP-SGD (\S\ref{sec:rw-dp}) \\
+    \texttt{compression.method}        & \texttt{top\_k\_quantize} & Bandwidth $\sim$$40\times$; free if the model is already at the DP floor (Finding 6.2) \\
+    \texttt{compression.top\_k\_ratio} & 0.05--0.10       & Conservative for imbalanced data; raise toward 0.2 if Finding 6.4 manifests \\
+    \texttt{compression.quant\_bits}   & 8                & Lossless modulo $\pm$ 1 LSB at the magnitudes we observe \\
+    \texttt{rounds}                    & 10--30           & 10 if SecAgg-only, 20+ if DP enabled (Opacus needs more steps) \\
+    \texttt{local\_epochs}             & 1--2             & Lower under DP (composition cost); higher without DP \\
+    \texttt{batch\_size}               & 32--64           & 64 under DP for better gradient averaging \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What this configuration does \emph{not} solve.} The class-prior
+collapse on extreme imbalance (records 100--115, 97\% N) is not curable
+within this configuration --- $\varepsilon$ would need to be relaxed past values
+that are clinically meaningful, or class-weighted DP-SGD would need to be
+implemented (\S\ref{sec:future}). On more moderate imbalance (records
+200--234, 82\% N) DP-only at the configuration above retains a
+$+6.4$\,pp signal over majority but the full pipeline at $\varepsilon =
+8$ does not. Operators should benchmark on their actual class
+distribution before fixing the budget.
+
 \section{What we deliberately did not test}
 
-\begin{itemize}[leftmargin=*]
-  \item Byzantine / poisoning attacks. The threat model is
-  honest-but-curious server plus model-recipient adversary.
-  \item Real network-level performance. The Flower simulation is in-process.
-  \item Patient-level privacy guarantees (vs.\ record-level). Each MIT-BIH
-  record corresponds to one patient in our partition, but the DP
-  $\varepsilon$ is per-record, not per-patient. Patient-level $\varepsilon$
-  via group privacy is an extension we list but did not implement.
-\end{itemize}
+The framework's threat model and experimental scope were chosen
+deliberately. Three exclusions, each with a different motivation:
+
+\paragraph{Byzantine / poisoning attacks.}
+The threat model (Chapter~\ref{ch:threat}) is honest-but-curious server
+plus model-recipient adversary. Robust aggregation rules (Krum, median,
+trimmed mean, multi-Krum) are the canonical defences against the
+Byzantine adversary A5 and compose cleanly on top of the existing
+privacy stack: a Byzantine-robust aggregator can replace the weighted
+average inside \texttt{PrivacyAwareFedAvg.aggregate\_fit}
+(\S\ref{sec:method-strategy}) without disturbing SecAgg cancellation or
+DP accounting. We do not run this experiment because the simulation has
+no native source of malicious clients, and synthesising one would
+require constructing the kind of attack we are not in a position to
+publish without an accompanying defence evaluation
+(\cite{blanchard2017krum, yin2018byzantine}).
+
+\paragraph{Real network-level performance.}
+The Flower simulation is in-process. We report bandwidth in bytes-per-round
+($\sim$$40\times$ savings under top-$k$+int8) but never measure
+end-to-end latency over a real wide-area or cellular link, never simulate
+client-side compute pressure on the IoT device's CPU/GPU, and never
+exercise dropout-tolerance: every client that starts a round finishes
+it. A production deployment would also want power consumption per round
+(measured on the actual wearable's SoC), thermal throttling under
+sustained training, and the latency distribution of SecAgg under
+real-network jitter. None of these are part of the contribution; the
+framework is dataset- and protocol-grade, not deployment-grade.
+
+\paragraph{Patient-level privacy guarantees (vs.\ record-level).}
+The DP-SGD construction in this framework provides record-level DP:
+each ECG beat is one record, and $\varepsilon$ bounds the influence of any single
+beat on the released model. In our partition each MIT-BIH record
+corresponds to one patient and contains thousands of beats, so the
+patient-level $\varepsilon$ is $k\varepsilon$ where $k$ is the number of beats per
+patient (group privacy). For our $k \approx 2000$ this is a vacuous
+guarantee at the patient level. Recovering meaningful patient-level $\varepsilon$
+would require either user-level DP-FedAvg~\cite{mcmahan2018dpfedavg}
+(server-side noise on the aggregated update, with client-level
+sensitivity instead of record-level) or a sampling protocol that admits
+each patient only sparsely into training. Both are listed in
+\S\ref{sec:future} as the natural extension that closes the gap between
+the framework's record-level guarantee and the patient-level
+guarantee that a HIPAA/GDPR deployment audit would actually demand.
 
 \section{Future work}\label{sec:future}
 
