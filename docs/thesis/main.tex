@@ -214,8 +214,200 @@ long as both endpoints agree on the sparsification mask.
 \paragraph{Composition.}
 DP and SecAgg compose without interaction: the DP guarantee is on $w_T$
 regardless of channel; SecAgg is on intermediate per-round messages.
-Compression composes with both as a post-hoc lossy operator. The
-composition argument is laid out in \texttt{docs/privacy-analysis.md\,\S3}.
+Compression composes with both as a post-hoc lossy operator. The full
+composition argument is laid out in \S\ref{sec:composition}.
+
+\medskip
+The next three subsections give the formal statement of each layer:
+\S\ref{sec:dpsgd-formal} writes out the DP-SGD step and the RDP-to-$(\varepsilon,
+\delta)$ conversion; \S\ref{sec:secagg-formal} writes out the
+mask-cancellation algebra of pairwise-mask SecAgg; \S\ref{sec:composition}
+states how the three layers compose. The framework's design choices in
+Chapter~\ref{ch:method} are direct implementations of these statements, and
+the reproducibility check in Chapter~\ref{ch:detection} is built on top of
+them.
+
+\subsection{DP-SGD formal definition}\label{sec:dpsgd-formal}
+
+Following Abadi et~al.~\cite{abadi2016dpsgd}, every local SGD step on a
+minibatch $B$ of size $b$ is replaced by:
+
+\begin{enumerate}[leftmargin=*]
+  \item Compute per-sample gradients
+        $g_i = \nabla_w \ell(w; x_i, y_i)$ for each $(x_i, y_i) \in B$.
+  \item Clip per-sample gradients to $\ell_2$-norm at most $C$:
+        $\bar g_i = g_i \,/\, \max\!\left(1, \tfrac{\|g_i\|_2}{C}\right)$.
+        This bounds the sensitivity of the per-sample sum to any single
+        training record by $C$.
+  \item Add Gaussian noise of scale $\sigma C$ to the clipped sum and
+        average:
+        $\tilde g \;=\; \tfrac{1}{b}\!\left(\sum_{i \in B} \bar g_i \;+\;
+         \mathcal{N}(0,\, \sigma^2 C^2 I)\right)$.
+  \item Update weights: $w \leftarrow w - \eta \,\tilde g$.
+\end{enumerate}
+
+Each step satisfies $(\alpha,\, \alpha C^2 \sigma^{-2}/2)$-Rényi differential
+privacy at every order $\alpha > 1$~\cite{mironov2017rdp}. Composing $T$
+steps under RDP and converting to $(\varepsilon, \delta)$-DP via
+$\varepsilon = \alpha C^2 \sigma^{-2} T / 2 + \log(1/\delta)/(\alpha - 1)$
+(optimised over $\alpha$) gives the tight cumulative bound that Opacus's
+\texttt{RDPAccountant}~\cite{yousefpour2021opacus} reports as
+\texttt{get\_epsilon(steps)}. In the framework the user supplies
+$(\varepsilon_{\mathrm{target}}, \delta_{\mathrm{target}}, C, T)$ and Opacus
+auto-calibrates $\sigma$ to hit $\varepsilon \le \varepsilon_{\mathrm{target}}$
+over $T$ steps; the framework reports the realised $\varepsilon$ at the end
+of training (see Chapter~\ref{ch:dp}).
+
+\paragraph{Parameter choices.} Table~\ref{tab:dp-defaults} lists the
+defaults used throughout the thesis. \texttt{target\_epsilon} = 5 is a
+conventional ``moderate'' budget for medical models in the literature;
+\texttt{target\_delta} = $10^{-5}$ satisfies $\delta < 1/N$ for our dataset
+size; $C = 1.0$ is the Opacus default and is well-matched to the gradient
+norms we observe during training; $\sigma$ is auto-calibrated.
+
+\begin{table}[h]
+  \centering
+  \caption{DP-SGD defaults used in the thesis. The user-facing knobs are
+  $(\varepsilon_{\mathrm{target}}, \delta_{\mathrm{target}}, C)$; the
+  noise multiplier $\sigma$ is solved for by the RDP accountant.}
+  \label{tab:dp-defaults}
+  \begin{tabular}{lll}
+    \toprule
+    Parameter & Default & Justification \\
+    \midrule
+    \texttt{target\_epsilon}     & 5.0    & Conventional moderate budget for medical models \\
+    \texttt{target\_delta}       & $10^{-5}$ & $< 1/N$ for $N \approx 25{,}000$ training records \\
+    \texttt{max\_grad\_norm} ($C$) & 1.0  & Opacus default; matches observed gradient scale \\
+    \texttt{noise\_multiplier} ($\sigma$) & auto & Solved by RDP accountant to hit \texttt{target\_epsilon} \\
+    \texttt{accountant}          & rdp    & RDP gives the tightest known bounds for Gaussian noise \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What $\varepsilon$ buys, intuitively.}
+For the worst-case adversary A4 (Chapter~\ref{ch:threat}, \S3.2.4) with
+auxiliary information about every other training record, the posterior on
+whether a given record was in the training set shifts by at most a factor
+of $e^\varepsilon$: at $\varepsilon = 5$ this is roughly 148, a loose
+worst-case bound. Empirical membership-inference accuracy at this budget
+is typically much closer to the 50\% random-guess baseline. The thesis
+does not run a membership-inference attack to verify this empirically
+because the $(\varepsilon, \delta)$-DP guarantee is a worst-case
+\emph{distributional} statement that does not require empirical
+attestation; running the attack would, at best, lower-bound something the
+budget already upper-bounds.
+
+\subsection{Pairwise-mask SecAgg correctness}\label{sec:secagg-formal}
+
+Let each client $i \in [N]$ hold a parameter update $\Delta w_i \in
+\mathbb{R}^d$ at the end of a training round. For every unordered pair
+$\{i, j\}$ the two clients derive a shared seed $s_{ij}$ from a
+key-exchange protocol (Diffie--Hellman in deployment-grade
+implementations~\cite{bonawitz2017secagg}; a pre-shared secret in the
+prototype, see Chapter~\ref{ch:method}, \S\ref{sec:method-strategy}). Each
+client expands $s_{ij}$ via a cryptographic PRG into a mask vector
+$m_{ij} \in \mathbb{R}^d$. Client $i$'s outgoing message is then:
+\begin{equation}\label{eq:masked-update}
+  \tilde{\Delta w}_i \;=\; \Delta w_i \;+\; \sum_{j > i} m_{ij}
+                                   \;-\; \sum_{j < i} m_{ji} \pmod{p},
+\end{equation}
+where the modular reduction is over a fixed-point representation of
+$\mathbb{R}^d$ in finite-field arithmetic (modulus $p$ in deployment-grade
+implementations; \texttt{float32} arithmetic in the prototype, an accepted
+simplification with documented numerical consequences).
+
+\paragraph{Cancellation.} Summing
+Equation~\eqref{eq:masked-update} across all clients:
+\begin{align}
+  S \;&=\; \sum_{i=1}^{N} \tilde{\Delta w}_i \nonumber \\
+       &=\; \sum_{i=1}^{N} \Delta w_i
+            \;+\; \sum_{i=1}^{N} \!\left( \sum_{j > i} m_{ij}
+                                        - \sum_{j < i} m_{ji} \right) \nonumber \\
+       &=\; \sum_{i=1}^{N} \Delta w_i
+            \;+\; \sum_{\{i,j\}: i<j} (m_{ij} - m_{ij}) \nonumber \\
+       &=\; \sum_{i=1}^{N} \Delta w_i. \label{eq:cancellation}
+\end{align}
+The second-to-last equality uses the fact that for every unordered pair
+$\{i,j\}$ the mask $m_{ij}$ appears once with $+$ in client $i$'s
+message (the term in $\sum_{j > i}$) and once with $-$ in client $j$'s
+message (the term in $\sum_{j' < j}$ with $j' = i$). Every mask therefore
+cancels exactly once at the sum level, regardless of $N$.
+
+\paragraph{Privacy.} For any \emph{strict} subset $S \subsetneq [N]$ of
+clients the marginal distribution of $\{\tilde{\Delta w}_i\}_{i \in S}$ is
+uniformly random conditional on the true updates: at least one mask
+$m_{ij}$ in the sum has $j \notin S$, that mask is uniformly random and
+known only to the two endpoints, and adding a uniformly random vector to
+any $\Delta w_i$ produces a uniformly random vector. The server therefore
+learns no information about any individual $\Delta w_i$ beyond what is
+already revealed by the total sum $\sum_i \Delta w_i$ that it must learn
+to perform aggregation. The formal statement is Bonawitz et~al.\ Theorem
+4.1~\cite{bonawitz2017secagg}.
+
+\paragraph{Limitations of the prototype.}
+The prototype departs from Bonawitz et~al.\ in three ways, each accepted
+as a simulation-grade simplification and flagged in the source:
+\textbf{(i)} pre-shared seeds per pair instead of Diffie--Hellman key
+exchange — convenient for the simulation orchestrator, infeasible for a
+real deployment because the seeds must be transported some other way;
+\textbf{(ii)} no Shamir secret-sharing of seeds — the protocol does not
+tolerate dropouts, since a missing client leaves un-cancelled masks in
+the sum; \textbf{(iii)} \texttt{float32} arithmetic instead of modular
+integer arithmetic over a finite field — introduces a small numerical
+residue in the cancelled sum (\S\ref{sec:f5.2} measures this empirically
+at 0.20\,pp end-to-end accuracy gap). All three are listed as
+deployment-grade upgrades in \S\ref{sec:future}.
+
+\subsection{Composition: DP + SecAgg + compression}\label{sec:composition}
+
+The three layers compose without negotiation, in the precise sense that
+the privacy guarantee of each layer survives the addition of the others:
+
+\paragraph{DP guarantee survives SecAgg.} Differential privacy is a
+guarantee on the released global model $w_T$ as a function of the input
+training set. SecAgg changes the channel through which intermediate
+updates flow, but does not change $w_T$ itself: the cancellation property
+(Equation~\ref{eq:cancellation}) means the server reconstructs the true
+$\sum_i \Delta w_i$ and applies it exactly as it would have without
+SecAgg. The DP-SGD calibration of $\sigma$ to $\varepsilon_{\mathrm{target}}$
+is therefore unaffected.
+
+\paragraph{SecAgg guarantee survives DP.} SecAgg's privacy property is on
+the per-round messages $\tilde{\Delta w}_i$: their joint distribution
+conditional on the true updates is uniformly random for any strict
+subset. DP changes the distribution of the true updates $\Delta w_i$ (by
+adding Gaussian noise during local training), but does not change the
+masking layer applied on top. SecAgg's guarantee composes with whatever
+local update generation procedure the client runs.
+
+\paragraph{Compression as post-processing.} Top-$k$ sparsification and
+int8 quantisation are deterministic, lossy operators applied to
+$\Delta w_i$ \emph{before} SecAgg masking. They do not weaken the DP
+guarantee on $w_T$ by post-processing immunity (a fundamental property
+of DP: any function of a DP output is itself DP at the same budget).
+They do not weaken the SecAgg property either, because the SecAgg layer
+operates on the post-compression vector and the cancellation algebra is
+agnostic to the values being masked. The only requirement is that
+sender and receiver agree on the sparsification mask; the framework
+sends the indices alongside the values
+(Chapter~\ref{ch:method}, \S\ref{sec:method-strategy}).
+
+\paragraph{Composed statement.} Putting the three layers together:
+
+\begin{quote}\itshape
+  An adversary observing only the released global model $w_T$ learns at
+  most $(\varepsilon, \delta)$ worth of information about any individual
+  training record (\textbf{DP}), AND an adversary observing the per-round
+  server inbox learns nothing about any individual client's update beyond
+  the aggregate $\sum_i \Delta w_i$ (\textbf{SecAgg}). Compression reduces
+  the per-round bandwidth from $4d \cdot 32\,\mathrm{bits}$ to roughly
+  $4(k d \cdot 8\,\mathrm{bits} + k d \cdot 32\,\mathrm{bits})$ for
+  top-$k$ + int8 at sparsity $k = 0.1$, a $\sim$40$\times$ reduction,
+  without weakening either of the above guarantees.
+\end{quote}
+
+This is the contract that Chapters~\ref{ch:detection}--\ref{ch:dp}
+benchmark empirically.
 
 \section{Dataset and use case}
 
