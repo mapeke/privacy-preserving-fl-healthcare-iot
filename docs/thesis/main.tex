@@ -10,6 +10,8 @@
 \usepackage{xcolor}
 \usepackage{enumitem}
 \usepackage{caption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 \hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
 
 \title{Privacy-Preserving Federated Learning for IoT-Based Healthcare:\\
@@ -976,6 +978,25 @@ hit \texttt{target\_epsilon} over the requested epochs; otherwise the
 user-supplied $\sigma$ is used. The returned handle exposes
 \texttt{get\_epsilon(steps)} for per-round budget reporting.
 
+Algorithm~\ref{alg:dpsgd} renders the local DP-SGD step in pseudocode. The
+clip-then-add-Gaussian-then-average pattern is the construction
+\S\ref{sec:dpsgd-formal} formalises; Opacus's \texttt{PrivacyEngine}
+implements lines 2--5 transparently after \texttt{attach\_dp} has wrapped
+the model, optimiser, and dataloader.
+
+\begin{algorithm}[h]
+\caption{Local DP-SGD step on minibatch $B$}\label{alg:dpsgd}
+\begin{algorithmic}[1]
+\Require model weights $w$, learning rate $\eta$, clip $C$, noise multiplier $\sigma$
+\State $g_i \gets \nabla_w \ell(w; x_i, y_i)$ \Comment{per-sample gradients, $i \in B$}
+\State $\bar g_i \gets g_i \,/\, \max(1,\, \|g_i\|_2 / C)$ \Comment{$\ell_2$ clip}
+\State $\hat g \gets \sum_{i \in B} \bar g_i + \mathcal{N}(0,\, \sigma^2 C^2 I)$ \Comment{noise addition}
+\State $\tilde g \gets \hat g \,/\, |B|$ \Comment{average over batch}
+\State $w \gets w - \eta\, \tilde g$ \Comment{SGD step}
+\State \Return $w$
+\end{algorithmic}
+\end{algorithm}
+
 \section{Secure aggregation (\texttt{src/privacy/secure\_agg.py})}
 
 \texttt{setup\_session(num\_clients, seed\_size\_bytes=32, rng\_seed=...)}
@@ -988,6 +1009,34 @@ client's update, so that summing all clients' masked updates cancels every
 mask exactly. \texttt{aggregate\_masked\_updates} performs the server-side
 sum on the strategy side
 (\S\ref{sec:method-strategy}).
+
+Algorithm~\ref{alg:secagg} renders the per-round client-side masking and
+the server-side aggregation. The cancellation property
+(Equation~\ref{eq:cancellation}, \S\ref{sec:secagg-formal}) is encoded in
+lines 4--5: the asymmetry between $\sum_{j > i}$ and $\sum_{j < i}$ is
+what makes every mask appear once with $+$ and once with $-$ across the
+full set of clients.
+
+\begin{algorithm}[h]
+\caption{Pairwise-mask SecAgg: client $i$ masks, server aggregates}\label{alg:secagg}
+\begin{algorithmic}[1]
+\Require client update $\Delta w_i$, session $\{s_{ij}\}_{j \neq i}$, total clients $N$
+\Function{MaskUpdate}{$\Delta w_i, i, \mathrm{session}$}
+  \State $m \gets 0_d$
+  \For{$j \in \{1,\ldots,N\} \setminus \{i\}$}
+    \If{$j > i$} $\quad m \gets m + \mathrm{derive\_mask}(s_{ij},\, d)$
+    \Else $\quad m \gets m - \mathrm{derive\_mask}(s_{ji},\, d)$
+    \EndIf
+  \EndFor
+  \State \Return $\tilde{\Delta w}_i \gets \Delta w_i + m$
+\EndFunction
+\Statex
+\Function{ServerAggregate}{$\{\tilde{\Delta w}_i\}_{i=1}^{N}$}
+  \State $S \gets \sum_{i=1}^{N} \tilde{\Delta w}_i$ \Comment{masks cancel by construction}
+  \State \Return $S \,/\, N$ \Comment{average; the wire weight $n_i$ folds in here}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
 
 \paragraph{Limitations explicitly accepted.}
 Pre-shared seeds rather than Diffie--Hellman; no Shamir secret-sharing
@@ -1008,6 +1057,36 @@ update array (zeros where sparsified). The wire payload is a
 \texttt{CompressedUpdate} dataclass with \texttt{indices}, \texttt{values},
 \texttt{original\_shape}, and a \texttt{num\_bytes()} method for bandwidth
 accounting.
+
+Algorithm~\ref{alg:compression} renders the round-trip. The
+\texttt{(scale, zero\_point)} quantisation parameters travel alongside the
+\texttt{values} on the wire; without them the receiver cannot dequantise
+back into floating point, so the wire payload is
+$\mathrm{indices} \times \mathrm{values} \times (\mathrm{scale},
+\mathrm{zero\_point})$. Bandwidth-wise, this dominates over float32 by
+$\sim$$40\times$ at $k = 0.1$ even after accounting for the index overhead.
+
+\begin{algorithm}[h]
+\caption{Top-$k$ + int8 compression round-trip}\label{alg:compression}
+\begin{algorithmic}[1]
+\Require update vector $u \in \mathbb{R}^d$, sparsity $k \in (0,1]$
+\Function{Compress}{$u, k$}
+  \State $K \gets \lceil k\,d \rceil$
+  \State $I \gets \mathrm{argpartition}(|u|,\, d - K)[d - K{:}d]$ \Comment{top-$K$ indices, $O(d)$}
+  \State $V_f \gets u[I]$ \Comment{floating-point values at those indices}
+  \State $\mathrm{scale} \gets (\max V_f - \min V_f) \,/\, 255$
+  \State $\mathrm{zp} \gets \mathrm{round}(-\min V_f \,/\, \mathrm{scale})$
+  \State $V_q \gets \mathrm{clip}(\mathrm{round}(V_f / \mathrm{scale}) + \mathrm{zp},\, 0,\, 255)$ \Comment{int8}
+  \State \Return $(I, V_q, \mathrm{scale}, \mathrm{zp},\, d)$
+\EndFunction
+\Statex
+\Function{Decompress}{$I, V_q, \mathrm{scale}, \mathrm{zp},\, d$}
+  \State $\hat u \gets 0_d$
+  \State $\hat u[I] \gets (V_q - \mathrm{zp}) \cdot \mathrm{scale}$
+  \State \Return $\hat u$ \Comment{$\hat u \approx u$; zeros at $\bar I$}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
 
 \section{Server strategy (\texttt{src/server/strategies.py})}\label{sec:method-strategy}
 
@@ -1052,6 +1131,82 @@ The test suite passes in 4.0s on the developer machine. \texttt{Opacus} is
 imported lazily inside \texttt{attach\_dp} so the tests run without it
 installed; the test that asserts that lazy-import property is itself an
 invariant.
+
+\section{Per-round data flow}\label{sec:dataflow}
+
+The previous sections describe each component in isolation. This section
+walks through what happens in one federated round end-to-end --- the path
+that every byte of every update traverses --- so the composition of
+DP-SGD, compression, masking, aggregation, decompression, and update
+travels visibly across the per-component sections instead of being
+implicit.
+
+A round is the unit of progress in Flower's
+\texttt{start\_simulation} loop. Each round consists of nine numbered
+steps; the configuration knobs that gate each step are listed alongside.
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Server samples clients.} \texttt{configure\_fit} on
+  \texttt{PrivacyAwareFedAvg} (\S\ref{sec:method-strategy}) selects a
+  fraction \texttt{fraction\_fit} of the $N$ available clients and caches
+  the broadcast parameters $w_t$ for the SecAgg unmasking path.
+  \item \textbf{Server broadcasts $w_t$.} Flower serialises $w_t$ to
+  NumPy arrays and dispatches to each sampled client via
+  \texttt{client\_fn(cid)}.
+  \item \textbf{Client local training.} The client constructs an
+  \texttt{EcgCNN} and a \texttt{DataLoader} from its private partition.
+  If \texttt{dp\_config} is set, \texttt{attach\_dp} (\S5.4) wraps the
+  optimiser and dataloader with Opacus's \texttt{PrivacyEngine}.
+  \texttt{local\_epochs} passes are then run; each minibatch step is
+  Algorithm~\ref{alg:dpsgd} (with DP) or vanilla SGD (without).
+  \item \textbf{Client computes the delta.} $\Delta w_i \gets w_i - w_t$
+  is the update payload; the cached broadcast parameters $w_t$ are kept
+  by the strategy so the server can later reconstruct $w_{t+1} = w_t +
+  \overline{\Delta w}$.
+  \item \textbf{Client compresses $\Delta w_i$ (optional).} If
+  \texttt{compression\_method} is set, \texttt{compress} (\S5.6,
+  Algorithm~\ref{alg:compression}) returns
+  $(I, V_q, \mathrm{scale}, \mathrm{zp},\, d)$. The compression is
+  applied per-tensor, not on the flattened vector, so the index payload
+  scales with the per-layer $K = \lceil k\,d_\ell \rceil$.
+  \item \textbf{Client masks $\Delta w_i$ (optional).} If
+  \texttt{secagg\_session} is set, \texttt{mask\_update} (\S5.5,
+  Algorithm~\ref{alg:secagg}) is applied to the post-compression
+  vector. The masked-and-compressed payload is the wire message.
+  \item \textbf{Server aggregates.} \texttt{aggregate\_fit} on
+  \texttt{PrivacyAwareFedAvg} reconstructs each client's
+  $\tilde{\Delta w}_i$ by subtracting $w_t$ from the returned parameters.
+  With SecAgg enabled it sums the $\tilde{\Delta w}_i$ (masks cancel by
+  Algorithm~\ref{alg:secagg}); without SecAgg it falls through to
+  Flower's vanilla weighted average. The output is
+  $\overline{\Delta w} = \tfrac{1}{N}\sum_i \Delta w_i$.
+  \item \textbf{Server decompresses (optional).} If compression was
+  applied, the per-client deltas are decompressed via
+  \texttt{decompress} (Algorithm~\ref{alg:compression}) before
+  averaging. The framework currently averages decompressed dense
+  vectors rather than the more efficient
+  decompress-after-summing-sparse, because the SecAgg layer requires
+  dense vectors to mask in the first place.
+  \item \textbf{Server updates the global model.}
+  $w_{t+1} \gets w_t + \overline{\Delta w}$. The new $w_{t+1}$ is
+  cached, evaluation is dispatched if the round is an
+  evaluation round, and the loop returns to step 1 for round $t+1$.
+\end{enumerate}
+
+\paragraph{Where the privacy layers attach.} Steps 3, 5, and 6 are the
+three privacy switches (\texttt{dp\_config}, \texttt{compression\_method},
+\texttt{secagg\_session}). The framework allows each to be
+\texttt{None}, in which case the corresponding step degenerates to the
+identity --- this is what makes the per-layer cost measurements in
+Chapters~\ref{ch:detection}--\ref{ch:dp} possible without code branches.
+
+\paragraph{Where the threat model attaches.} The on-wire payload between
+steps 6 and 7 is the SecAgg-masked, compressed delta; this is what
+adversaries A1, A2, and A3 (\S\ref{ch:threat}) see. The released global
+model $w_T$ at the end of $T$ rounds is what adversary A4 sees. The
+local data on each client never crosses the wire; this is the
+data-minimisation property that motivates the framework
+(Chapter~\ref{ch:intro}, \S1.1).
 
 \chapter{Results I --- Centralized and federated baselines}\label{ch:detection}
 
