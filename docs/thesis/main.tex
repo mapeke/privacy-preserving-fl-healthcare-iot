@@ -2121,4 +2121,581 @@ ICML 2018, pp.\ 5650--5659.
 
 \end{thebibliography}
 
+\appendix
+
+\chapter{Architecture and package layout}\label{app:arch}
+
+This appendix gives the system-level view of the framework: the actors,
+the per-round data flow as a numbered protocol (re-stated from
+\S\ref{sec:dataflow} with the actors made explicit), and the package
+layout of the implementation. It expands on the in-body Method chapter
+with the level of operational detail a reader who wants to extend the
+framework will need.
+
+\section{Actors}
+
+\begin{verbatim}
++---------------------------+         +------------------------------+
+|   IoT Healthcare Device   |   ...   |   Aggregation Server         |
+|  (simulated client x N)   | <-----> | (orchestrator + aggregator)  |
++---------------------------+         +------------------------------+
+        ^                                          ^
+        | holds raw ECG (private)                  | holds global model state
+        | runs DP-SGD locally                      | runs custom FedAvg strategy
+        | masks update with SecAgg                 | unmasks via SecAgg
+        | compresses delta                         | decompresses + aggregates
+\end{verbatim}
+
+\paragraph{IoT client.} Owns a partition of patient ECG beats; never
+shares raw data; trains locally. In the simulation each client is a
+Python process orchestrated by Flower's Ray-based simulation backend.
+
+\paragraph{Aggregation server.} Coordinates rounds; aggregates masked,
+compressed updates; never sees raw data. In the simulation the server
+is a single Python process running the custom \texttt{PrivacyAwareFedAvg}
+strategy.
+
+\paragraph{Adversary (modeled).} Honest-but-curious server, a coalition
+of curious clients, or a network eavesdropper. The detailed adversary
+characterisation is Chapter~\ref{ch:threat}.
+
+\section{Per-round protocol}
+
+The protocol below is the sequence of messages exchanged in one
+training round. The encryption envelope (TLS) is assumed at the
+transport layer and not shown.
+
+\begin{verbatim}
+Round t:
+  S -> C_i: broadcast w_t                                 (for each client i)
+  C_i:      run local DP-SGD for E epochs on D_i
+  C_i:      Delta_i = w_local - w_t                       (client-side delta)
+  C_i:      Delta_i = compress(Delta_i)                   (optional)
+  C_i:      Delta_i = mask_update(Delta_i, i, session)    (optional, SecAgg)
+  C_i -> S: send (Delta_i, n_i)
+  S:        Sum = sum_i Delta_i                           (masks cancel)
+  S:        Sum = decompress(Sum)                         (optional)
+  S:        w_{t+1} = w_t + (1 / sum_i n_i) * sum_i n_i * Delta_i
+\end{verbatim}
+
+The cryptographic property that makes the cancellation step work is
+that every pairwise mask appears once with $+$ and once with $-$
+across the client set; \S\ref{sec:secagg-formal} contains the full
+algebra. Any \emph{strict subset} of masked updates remains a uniformly
+random vector, so the server learns nothing about an individual
+client's update.
+
+\section{Package layout (\texttt{src/})}
+
+\begin{verbatim}
+src/
+|-- data/                       # everything that touches raw signals
+|   |-- mitbih_loader.py        # downloads MIT-BIH (or synthetic fallback)
+|   |-- preprocessing.py        # bandpass filter, beat segmentation, AAMI 5-class
+|   `-- partitioner.py          # IID / Dirichlet non-IID splits across N devices
+|
+|-- models/                     # DL architectures
+|   |-- ecg_cnn.py              # full 1D CNN (~50k params)
+|   `-- lightweight.py          # tiny variant (~5k params) for edge constraints
+|
+|-- client/                     # client-side runtime
+|   |-- flower_client.py        # NumPyClient (fit / evaluate / get_parameters)
+|   |-- dp_trainer.py           # local training loop wrapped by Opacus PrivacyEngine
+|   `-- iot_device.py           # simulates compute / bandwidth limits per device
+|
+|-- privacy/                    # cryptographic + statistical defenses
+|   |-- differential_privacy.py # noise calibration; DP accountant (Opacus wrapper)
+|   |-- secure_agg.py           # PRG-based pairwise mask primitives
+|   `-- compression.py          # top-k sparsification + 8-bit quantization
+|
+|-- server/                     # server-side runtime
+|   |-- flower_server.py        # entry point; starts simulation
+|   |-- strategies.py           # PrivacyAwareFedAvg with hooks for SecAgg + decompression
+|   `-- secure_aggregation.py   # server's view of the masking protocol
+|
+`-- utils/                      # cross-cutting helpers
+    |-- config.py               # YAML config loader with CLI override support
+    |-- metrics.py              # accuracy, macro-F1, per-class P/R
+    |-- logging_utils.py        # console + file handlers
+    `-- seed.py                 # reproducibility
+\end{verbatim}
+
+\section{Configuration knobs}
+
+The most consequential YAML keys (full schema in Appendix~\ref{app:configs}):
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{federation.num\_clients} --- total IoT devices.
+  \item \texttt{federation.clients\_per\_round} --- sampled fraction (Flower's \texttt{fraction\_fit}).
+  \item \texttt{federation.local\_epochs} --- local SGD passes per round.
+  \item \texttt{privacy.differential\_privacy.target\_epsilon}, \texttt{target\_delta} --- DP budget.
+  \item \texttt{privacy.differential\_privacy.max\_grad\_norm} --- DP gradient clip threshold.
+  \item \texttt{privacy.secure\_aggregation.enabled} --- pairwise masking on/off.
+  \item \texttt{privacy.compression.top\_k\_ratio} --- fraction of weights kept per layer.
+  \item \texttt{privacy.compression.quant\_bits} --- quantization width (default 8).
+\end{itemize}
+
+\section{Where the substance lives}
+
+For a reader who wants to inspect the implementation, the four files
+that carry the bulk of the contribution are:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{src/server/strategies.py} --- the custom
+  \texttt{PrivacyAwareFedAvg} that orchestrates the privacy stack.
+  \item \texttt{src/privacy/differential\_privacy.py} --- DP
+  accounting and \texttt{PrivacyEngine} attachment (Listing~\ref{lst:dp}).
+  \item \texttt{src/privacy/secure\_agg.py} --- the pairwise-mask
+  correctness argument in code (Listing~\ref{lst:secagg}).
+  \item \texttt{src/client/flower\_client.py} --- the client side of
+  every round.
+\end{itemize}
+
+\chapter{Resolved YAML configurations}\label{app:configs}
+
+This appendix lists the five YAML configurations that produce every
+number in the thesis. The five configurations form an inheritance
+chain: \texttt{default.yaml} is the base, the three single-defence
+configurations override the relevant \texttt{privacy.*} subtree, and
+\texttt{experiment\_full.yaml} enables all three. Each
+\texttt{run\_*.py} entry point also dumps a \texttt{resolved\_config.yaml}
+into the run's \texttt{results/} directory; the listings below are the
+on-disk source configs, not the post-resolution output.
+
+\section{\texttt{configs/default.yaml}}\label{app:cfg-default}
+
+Base configuration. Vanilla FedAvg, no privacy defences enabled.
+Records 100--115; 4 clients; Dirichlet $\alpha = 0.5$ partitions; 10
+rounds; 2 local epochs; SGD with $\eta = 0.01$, momentum 0.9, weight
+decay $10^{-4}$; batch 32.
+
+\begin{verbatim}
+experiment:
+  name: vanilla_fedavg
+  output_dir: results/vanilla_fedavg
+  seed: 42
+
+data:
+  source: mitbih          # mitbih | synthetic
+  cache_dir: data/cache
+  records: [100, 101, 103, 105, 106, 108, 109, 111, 112, 113, 114, 115]
+  window_size: 360        # samples per ECG beat window (~1 second @ 360 Hz)
+  num_classes: 5          # AAMI 5-class scheme (N, S, V, F, Q)
+  test_fraction: 0.2
+
+partitioning:
+  scheme: dirichlet       # iid | dirichlet
+  dirichlet_alpha: 0.5    # lower = more non-IID
+  min_samples_per_client: 50
+
+federation:
+  num_clients: 4
+  clients_per_round: 4    # all clients participate every round
+  num_rounds: 10
+  local_epochs: 2
+  local_batch_size: 32
+
+model:
+  name: ecg_cnn           # ecg_cnn | lightweight
+  dropout: 0.3
+
+optimization:
+  optimizer: sgd
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+
+privacy:
+  differential_privacy:
+    enabled: false
+  secure_aggregation:
+    enabled: false
+  compression:
+    enabled: false
+
+evaluation:
+  evaluate_every: 1       # evaluate global model every N rounds
+  metrics: [accuracy, macro_f1, per_class_f1]
+
+logging:
+  level: INFO
+  log_to_file: true
+\end{verbatim}
+
+\section{\texttt{configs/experiment\_secagg.yaml}}\label{app:cfg-secagg}
+
+Adds pairwise-mask SecAgg. All other keys inherit from
+\texttt{default.yaml}.
+
+\begin{verbatim}
+experiment:
+  name: federated_secagg
+  output_dir: results/federated_secagg
+
+privacy:
+  differential_privacy:
+    enabled: false
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32     # PRG seed size used to derive mask material
+    fixed_point_bits: 16    # quantization for fixed-point mask arithmetic
+  compression:
+    enabled: false
+\end{verbatim}
+
+\section{\texttt{configs/experiment\_dp.yaml}}\label{app:cfg-dp}
+
+Adds DP-SGD via Opacus, target $\varepsilon = 5$, target $\delta =
+10^{-5}$. Increases rounds (20) and decreases local epochs (1) and
+learning rate (0.005); raises batch size to 64 for better gradient
+signal-to-noise under DP noise.
+
+\begin{verbatim}
+experiment:
+  name: federated_dp
+  output_dir: results/federated_dp
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 5.0
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0      # gradient clipping threshold C
+    noise_multiplier: null  # null = auto-calibrate to hit target_epsilon
+    accountant: rdp         # rdp | gdp
+  secure_aggregation:
+    enabled: false
+  compression:
+    enabled: false
+
+federation:
+  num_rounds: 20
+  local_epochs: 1
+  local_batch_size: 64       # larger batch -> better signal-to-noise
+
+optimization:
+  learning_rate: 0.005
+\end{verbatim}
+
+\section{\texttt{configs/experiment\_full.yaml}}\label{app:cfg-full}
+
+The headline experiment: DP + SecAgg + top-$k$/int8 compression. 30
+rounds; target $\varepsilon = 8$ (slightly looser than the DP-only run
+to compensate for compression noise). Compression keeps the top 10\%
+of magnitudes per layer and quantises to int8.
+
+\begin{verbatim}
+experiment:
+  name: federated_full_pipeline
+  output_dir: results/federated_full_pipeline
+
+privacy:
+  differential_privacy:
+    enabled: true
+    target_epsilon: 8.0      # slightly looser to compensate for compression noise
+    target_delta: 1.0e-5
+    max_grad_norm: 1.0
+    accountant: rdp
+  secure_aggregation:
+    enabled: true
+    seed_size_bytes: 32
+    fixed_point_bits: 16
+  compression:
+    enabled: true
+    method: top_k_quantize   # top_k_quantize | quantize_only | top_k_only
+    top_k_ratio: 0.1         # keep top 10% of weights by magnitude per layer
+    quant_bits: 8
+
+federation:
+  num_rounds: 30
+  local_epochs: 1
+  local_batch_size: 64
+
+optimization:
+  learning_rate: 0.005
+\end{verbatim}
+
+\section{Follow-up configs (\texttt{configs/followup\_records200/})}\label{app:cfg-followup}
+
+The records 200--234 follow-up uses the same five configurations with
+two changes: \texttt{data.records} is set to \texttt{[200, 201, ...,
+234]} and the \texttt{output\_dir} is rooted at
+\texttt{results/followup\_records200/}. No hyperparameters are
+retuned; the contribution is the relative shape across the privacy
+stack, not the absolute accuracy on either slice
+(\S\ref{sec:f6.3}).
+
+\chapter{Selected source code}\label{app:code}
+
+This appendix reproduces the three short, consequential pieces of
+source code referenced throughout the thesis: the SecAgg client-side
+mask and server-side aggregation; the top-$k$ + int8 compression
+round-trip; and the DP attachment to a PyTorch model + optimiser via
+Opacus. The full source is available at
+\url{https://github.com/mapeke/privacy-preserving-fl-healthcare-iot}.
+
+\section{Pairwise-mask SecAgg (\texttt{src/privacy/secure\_agg.py})}\label{lst:secagg}
+
+The two functions below implement Algorithm~\ref{alg:secagg}. The
+asymmetric \texttt{if client\_id < j: masked += mask else: masked -=
+mask} is the entire cancellation property in code form. The same
+function is exercised by
+\texttt{tests/test\_secagg.py::test\_masks\_cancel\_under\_aggregation}.
+
+\begin{verbatim}
+def derive_mask(seed: bytes, shape) -> np.ndarray:
+    """Expand a pair seed into a Gaussian mask vector via NumPy's PCG64."""
+    if isinstance(shape, int):
+        shape = (shape,)
+    seed_int = int.from_bytes(seed, byteorder="big", signed=False)
+    rng = np.random.default_rng(seed_int)
+    return rng.standard_normal(size=shape).astype(np.float32)
+
+
+def mask_update(update, client_id: int, session: SecAggSession) -> np.ndarray:
+    """Add the pairwise masks for client_id to update.
+
+    For every other client j: if client_id < j, add +m_{client_id,j};
+    otherwise add -m_{j,client_id}. Summing across all clients cancels
+    every mask exactly.
+    """
+    if not (0 <= client_id < session.num_clients):
+        raise ValueError(f"client_id {client_id} out of range")
+
+    masked = update.astype(np.float32, copy=True)
+    for j in range(session.num_clients):
+        if j == client_id:
+            continue
+        seed = session.seed_for(client_id, j)
+        mask = derive_mask(seed, update.shape)
+        if client_id < j:
+            masked += mask
+        else:
+            masked -= mask
+    return masked
+
+
+def aggregate_masked_updates(masked_updates) -> np.ndarray:
+    """Element-wise sum; pair-masks cancel by construction."""
+    if not masked_updates:
+        raise ValueError("empty update list")
+    stacked = np.stack(masked_updates, axis=0)
+    return stacked.sum(axis=0)
+\end{verbatim}
+
+\section{Top-$k$ + int8 compression (\texttt{src/privacy/compression.py})}\label{lst:compress}
+
+\texttt{top\_k\_sparsify} uses \texttt{np.argpartition} for $O(n)$
+top-$k$ selection rather than the $O(n \log n)$ full sort.
+\texttt{quantize\_int8} computes the
+\texttt{(scale, zero\_point)} pair from the per-tensor min/max so that
+dequantisation reconstructs the floating-point values to within $\pm 1$
+LSB.
+
+\begin{verbatim}
+def top_k_sparsify(update, ratio: float):
+    """Keep only the top-ratio entries by absolute value (O(n))."""
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("ratio must be in (0, 1]")
+    flat = update.ravel().astype(np.float32, copy=False)
+    k = max(1, int(round(flat.size * ratio)))
+    if k >= flat.size:
+        return np.arange(flat.size, dtype=np.int32), flat.copy()
+    idx = np.argpartition(np.abs(flat), -k)[-k:]
+    idx = np.sort(idx).astype(np.int32)
+    return idx, flat[idx].copy()
+
+
+def quantize_int8(values):
+    """Min-max quantise a float vector into int8.
+
+    Returns (int8_values, scale, zero_point) so that
+        values ~= scale * (int8_values.astype(float32) - zero_point)
+    """
+    if values.size == 0:
+        return values.astype(np.int8), 1.0, 0.0
+    v_min = float(values.min())
+    v_max = float(values.max())
+    if v_max == v_min:
+        return np.zeros_like(values, dtype=np.int8), 1.0, 0.0
+    qmin, qmax = -128, 127
+    scale = (v_max - v_min) / (qmax - qmin)
+    zero_point = qmin - v_min / scale
+    quant = np.round(values / scale + zero_point)
+    quant = np.clip(quant, qmin, qmax).astype(np.int8)
+    return quant, float(scale), float(zero_point)
+
+
+def dequantize_int8(quant, scale: float, zero_point: float):
+    return (quant.astype(np.float32) - zero_point) * scale
+\end{verbatim}
+
+\section{DP attachment (\texttt{src/privacy/differential\_privacy.py})}\label{lst:dp}
+
+\texttt{attach\_dp} is a thin wrapper around Opacus's
+\texttt{PrivacyEngine.make\_private\_with\_epsilon}. The function-level
+import of Opacus is the lazy-import invariant tested in
+\texttt{tests/test\_dp.py}: the rest of the test suite must run without
+Opacus installed.
+
+\begin{verbatim}
+@dataclass
+class DPConfig:
+    target_epsilon: float = 5.0
+    target_delta: float = 1e-5
+    max_grad_norm: float = 1.0
+    noise_multiplier: float | None = None  # None => auto-calibrate
+    accountant: str = "rdp"                # "rdp" | "gdp" | "prv"
+
+    def validate(self) -> None:
+        if self.target_epsilon <= 0:
+            raise ValueError("target_epsilon must be positive")
+        if not (0 < self.target_delta < 1):
+            raise ValueError("target_delta must be in (0, 1)")
+        if self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be positive")
+
+
+def attach_dp(model, optimizer, data_loader, config: DPConfig, epochs: int):
+    """Wrap (model, optimizer, data_loader) with Opacus PrivacyEngine.
+
+    If config.noise_multiplier is None, Opacus solves for sigma to hit
+    config.target_epsilon over `epochs` epochs of the given dataloader.
+    """
+    config.validate()
+    from opacus import PrivacyEngine          # lazy import (CI-asserted)
+
+    engine = PrivacyEngine(accountant=config.accountant)
+    if config.noise_multiplier is None:
+        model_p, optimizer_p, loader_p = engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=data_loader,
+            target_epsilon=config.target_epsilon,
+            target_delta=config.target_delta,
+            max_grad_norm=config.max_grad_norm,
+            epochs=epochs,
+        )
+    else:
+        model_p, optimizer_p, loader_p = engine.make_private(
+            module=model,
+            optimizer=optimizer,
+            data_loader=data_loader,
+            noise_multiplier=config.noise_multiplier,
+            max_grad_norm=config.max_grad_norm,
+        )
+    return DPHandles(
+        engine=engine,
+        model=model_p,
+        optimizer=optimizer_p,
+        data_loader=loader_p,
+        epochs=epochs,
+    )
+\end{verbatim}
+
+\chapter{Reproducibility checklist}\label{app:repro}
+
+This appendix lists the exact steps to reproduce every number in the
+thesis from a clean clone. No tuning is required; every reported
+result is tied to one committed YAML configuration.
+
+\section{Environment}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{OS:} Windows 10 Pro (the development machine); equivalent
+  Linux distributions work without modification.
+  \item \textbf{Python:} 3.12 (3.10+ is sufficient).
+  \item \textbf{GPU:} a single CUDA-capable GPU. Development was on a
+  mobile-class NVIDIA RTX with 6\,GB VRAM; the framework is not
+  memory-bound and runs on smaller GPUs without issue.
+  \item \textbf{CUDA:} 12.1 (matched by PyTorch 2.4 wheel).
+  \item \textbf{Disk:} $\sim$200\,MB for the MIT-BIH cache, $\sim$50\,MB
+  for run artefacts.
+\end{itemize}
+
+\section{Setup}
+
+\begin{verbatim}
+git clone https://github.com/mapeke/privacy-preserving-fl-healthcare-iot.git
+cd privacy-preserving-fl-healthcare-iot
+pip install -r requirements.txt
+pytest tests/ -q       # 42 passed in ~4 s
+\end{verbatim}
+
+\section{Reproducing the five primary experiments (records 100--115)}
+
+Each command reads its config from \texttt{configs/}, writes its
+results into \texttt{results/<name>/}, and dumps a
+\texttt{resolved\_config.yaml} so the exact configuration of the run is
+on disk alongside the metrics.
+
+\begin{verbatim}
+PYTHONPATH=. python -m experiments.run_centralized      \
+    --config configs/default.yaml --epochs 5
+PYTHONPATH=. python -m experiments.run_federated        \
+    --config configs/default.yaml
+PYTHONPATH=. python -m experiments.run_federated_dp     \
+    --config configs/experiment_dp.yaml
+PYTHONPATH=. python -m experiments.run_federated_secagg \
+    --config configs/experiment_secagg.yaml
+PYTHONPATH=. python -m experiments.run_full_pipeline    \
+    --config configs/experiment_full.yaml
+\end{verbatim}
+
+\section{Reproducing the records 200--234 follow-up}
+
+Same five entry points, with the four follow-up configs:
+
+\begin{verbatim}
+PYTHONPATH=. python -m experiments.run_federated        \
+    --config configs/followup_records200/default.yaml
+PYTHONPATH=. python -m experiments.run_federated_secagg \
+    --config configs/followup_records200/experiment_secagg.yaml
+PYTHONPATH=. python -m experiments.run_federated_dp     \
+    --config configs/followup_records200/experiment_dp.yaml
+PYTHONPATH=. python -m experiments.run_full_pipeline    \
+    --config configs/followup_records200/experiment_full.yaml
+\end{verbatim}
+
+\section{Approximate run-times (single RTX-class GPU)}
+
+\begin{tabular}{lr}
+  \toprule
+  Run & Wall time \\
+  \midrule
+  Centralized (5 epochs)                    & $\sim$1 min \\
+  Vanilla FedAvg (10 rounds)                & $\sim$3 min \\
+  FedAvg + SecAgg (10 rounds)               & $\sim$3 min \\
+  FedAvg + DP (20 rounds)                   & $\sim$30 min \\
+  Full pipeline (30 rounds)                 & $\sim$30 min \\
+  \midrule
+  Records 200--234 follow-up (all four runs) & $\sim$70 min \\
+  \bottomrule
+\end{tabular}
+
+\section{What is logged per run}
+
+Each \texttt{results/<name>/} directory contains:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{run.log} --- the full console log of the run
+  (round-by-round accuracy, $\varepsilon$ updates, any warnings).
+  \item \texttt{resolved\_config.yaml} --- the exact configuration
+  applied, including any CLI overrides.
+  \item \texttt{history.json} --- the Flower-style metrics history,
+  parsed by the analysis notebooks.
+\end{itemize}
+
+\section{Single seed; multi-seed is future work}
+
+Every reported number is a single-seed run at \texttt{seed: 42} (set in
+\texttt{configs/default.yaml}). Multi-seed validation is the first item
+of \S\ref{sec:future}; it would put error bars on
+Table~\ref{tab:detection-grid} and on the records 200--234 follow-up
+table. The DP class-prior collapse (Finding 6.1) is structural rather
+than seed-dependent --- it is the model converging to the
+majority-class predictor, which the same training process produces from
+any random initialisation --- so multi-seed would not change Finding
+6.1 qualitatively.
+
 \end{document}
