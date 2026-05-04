@@ -54,7 +54,7 @@ Every number in the thesis is reproducible from a committed YAML configuration v
 
 \tableofcontents
 
-\chapter{Introduction}
+\chapter{Introduction}\label{ch:intro}
 
 \section{Motivation}
 
@@ -129,6 +129,10 @@ collapses.
 
 Chapter~\ref{ch:bg} reviews FL, the three privacy primitives we layer, and the
 MIT-BIH dataset.
+Chapter~\ref{ch:related} situates the framework in the existing literature on
+FL aggregation, DP-SGD, SecAgg, gradient compression, privacy-preserving FL
+on healthcare data, and the membership-inference and gradient-inversion
+attacks that motivate each layer.
 Chapter~\ref{ch:threat} formalises the threat model: the assets being
 protected, five adversaries A1--A5 with their capabilities and goals, the
 attack-surface coverage matrix, and the trust assumptions the framework
@@ -458,6 +462,218 @@ ECG monitoring is the canonical wearable-IoT health workload; MIT-BIH is the
 canonical benchmark for it; the AAMI mapping is the canonical label scheme.
 A privacy-preserving FL framework that ignores the imbalance characteristic of
 this canonical workload is over-claiming.
+
+\chapter{Related work}\label{ch:related}
+
+This thesis contributes a layered-defence FL framework rather than a new
+privacy primitive (Chapter~\ref{ch:intro}, \S1.4); the contribution rests on
+how existing primitives compose and what each layer costs on a realistic
+healthcare workload. This chapter places each of those primitives, and the
+attacks they are built to mitigate, in the context of the existing
+literature. Six strands matter: the FL aggregation rule that everything
+sits on top of (\S\ref{sec:rw-fl}); the DP-SGD lineage that drives the
+privacy guarantee on the released model (\S\ref{sec:rw-dp}); the secure
+aggregation lineage that closes the per-update channel
+(\S\ref{sec:rw-secagg}); the gradient compression literature that supplies
+the bandwidth optimisation (\S\ref{sec:rw-compress}); prior
+privacy-preserving FL work specifically on healthcare data
+(\S\ref{sec:rw-health}); and the gradient-inversion and
+membership-inference attacks that justify the threat model
+(\S\ref{sec:rw-attacks}).
+
+\section{Federated learning aggregation}\label{sec:rw-fl}
+
+\paragraph{FedAvg.} The federated averaging protocol of McMahan
+et~al.~\cite{mcmahan2017fedavg} introduced the now-canonical pattern: each
+client runs $E$ local epochs of SGD on its private data, the server
+weighted-averages the resulting parameter updates, and the protocol
+iterates for $T$ communication rounds. FedAvg works well when client data
+distributions are similar and the model is not over-parameterised. It is
+the baseline of this thesis; \S\ref{sec:f4.1} confirms that on the MIT-BIH
+workload it matches the centralized baseline within seed variance, so no
+stronger aggregation rule is needed for the framework's contribution to be
+visible.
+
+\paragraph{FedProx.} Li et~al.~\cite{li2020fedprox} added a proximal
+regulariser $\tfrac{\mu}{2}\|w_i - w_t\|^2$ to each client's local loss to
+mitigate client drift in heterogeneous settings (different local data
+distributions, different local-epoch counts). FedProx is strictly more
+robust than FedAvg when the heterogeneity is severe but pays a small
+constant cost otherwise. We do not use it because FedAvg already achieves
+the centralized baseline.
+
+\paragraph{SCAFFOLD.} Karimireddy et~al.\ proposed SCAFFOLD, which
+estimates and corrects for client drift via per-client control variates,
+producing strictly better convergence than FedAvg in non-IID settings. The
+correction adds bookkeeping overhead and additional state per client.
+Like FedProx, it is overkill for our workload.
+
+\paragraph{Surveys.} Kairouz et~al.~\cite{kairouz2021advances} provide the
+canonical survey of FL open problems and design space, including
+privacy-preserving variants. We treat their taxonomy as the reference for
+deployment-grade FL terminology.
+
+\section{Differential privacy in deep learning}\label{sec:rw-dp}
+
+\paragraph{Foundations.} Differential privacy was introduced by
+Dwork~\cite{dwork2006dp} as a quantitative bound on what an adversary
+holding the output of an algorithm can learn about any single input
+record. The Gaussian mechanism is the canonical noise-addition primitive
+used here.
+
+\paragraph{DP-SGD.} Abadi et~al.~\cite{abadi2016dpsgd} adapted DP to
+deep-learning training by clipping per-sample gradients before adding
+calibrated Gaussian noise. The framework uses this exact construction at
+the local-training step (\S\ref{sec:dpsgd-formal}). The two follow-ups
+that drive accountant tightness are Mironov's Rényi differential
+privacy~\cite{mironov2017rdp} (which gives the tightest known
+$(\varepsilon, \delta)$ bounds for Gaussian DP-SGD) and the Privacy Random
+Variable accountant~\cite{gopi2021prv} (slightly tighter still, supported
+by Opacus as an alternative); the framework uses RDP by default.
+
+\paragraph{DP-FedAvg.} McMahan et~al.~\cite{mcmahan2018dpfedavg} extended
+DP-SGD to the federated setting with user-level privacy guarantees,
+applying noise at the server-side aggregation step rather than the
+client-side gradient step. Our construction places noise at the client
+side (closer to standard DP-SGD), which gives \emph{record-level} DP
+within each client; user-level DP would require either client-side
+sampling at session boundaries or server-side noise. The trade-off is
+discussed in Chapter~\ref{ch:disc}, \S7.4.
+
+\paragraph{Opacus.} The Yousefpour et~al.\ Opacus
+library~\cite{yousefpour2021opacus} is the framework's DP-SGD
+implementation. Opacus contributes the per-sample-gradient hook
+machinery, the RDP accountant, and the API for auto-calibrating $\sigma$
+to a target $\varepsilon$. The framework's
+\texttt{differential\_privacy.attach\_dp} is a thin wrapper around
+\texttt{opacus.PrivacyEngine.make\_private\_with\_epsilon}.
+
+\paragraph{Wei et~al.\ on DP-FL.} Wei et~al.~\cite{wei2020dpfl} provide
+the most thorough empirical study of DP-FL utility-privacy tradeoffs to
+date. They report that DP-FL on balanced benchmarks pays a small,
+predictable utility cost; our work extends their analysis to imbalanced
+healthcare data and finds a structurally different cost (class-prior
+collapse, Chapter~\ref{ch:dp}).
+
+\section{Secure aggregation}\label{sec:rw-secagg}
+
+\paragraph{Bonawitz et~al.\ pairwise mask.} The secure-aggregation
+protocol of Bonawitz et~al.~\cite{bonawitz2017secagg} is the framework's
+direct ancestor. The protocol uses Diffie--Hellman key exchange to
+derive pairwise seeds, expands the seeds via a PRG into mask vectors,
+and uses Shamir secret-sharing of the seeds to tolerate up to $t$ client
+dropouts per round. Each client masks its update; the masks cancel under
+summation, so the server sees only the aggregate. Our prototype
+implements the cancellation property (\S\ref{sec:secagg-formal}) but not
+the dropout tolerance --- the simulation never drops a client.
+
+\paragraph{Subsequent SecAgg variants.} A line of follow-up work
+optimises SecAgg in different directions: SecAgg+~\cite{bell2020secaggplus}
+reduces communication via a polylogarithmic communication graph;
+LightSecAgg~\cite{so2022lightsecagg} eliminates the quadratic pairwise-mask
+cost via single-mask broadcast and Lagrange-coded computing. These are
+deployment-grade upgrades that the prototype does not need in order to
+demonstrate the cancellation property.
+
+\paragraph{TEE-based alternatives.} Trusted-execution-environment-based
+schemes (Intel SGX, AMD SEV) provide aggregation confidentiality without
+cryptographic masking, at the cost of a hardware trust assumption. We do
+not use them because the framework is hardware-agnostic by design.
+
+\section{Gradient compression}\label{sec:rw-compress}
+
+\paragraph{Communication efficiency in FL.} Konečný
+et~al.~\cite{konecny2016fedlearning} introduced the structured-update and
+sketched-update families that compress FL traffic by two orders of
+magnitude with bounded utility loss. Our top-$k$+int8 scheme is the
+unstructured-sparsification + scalar-quantisation member of that family.
+
+\paragraph{signSGD and 1-bit SGD.} Bernstein
+et~al.~\cite{bernstein2018signsgd} push compression to its extreme:
+transmit only the sign of each gradient component. signSGD trades
+bandwidth for variance and has known convergence issues in non-IID FL,
+which is why we use top-$k$ instead.
+
+\paragraph{Top-$k$ sparsification.} Aji and
+Heafield~\cite{aji2017topk} demonstrated that retaining only the
+$\sim$1\% largest-magnitude gradient components per layer preserves
+training quality on language modelling. We use $k = 0.1$ (10\%) which is
+conservative for an imbalanced classification workload where rare-class
+gradients are already small.
+
+\paragraph{Compression with privacy.} Top-$k$ sparsification interacts
+with DP-SGD in subtle ways: the noise that DP adds at the gradient step
+becomes concentrated in a smaller index set when post-hoc sparsified,
+amplifying its effect on the surviving entries. This is consistent with
+our Finding 6.4 (\S\ref{sec:f6.3}): top-$k$ + int8 on top of DP-SGD pushes
+the model back across the cliff on records 200--234, where DP-SGD alone
+clears it.
+
+\section{Privacy-preserving FL in healthcare}\label{sec:rw-health}
+
+\paragraph{FL on ECG.} Kachuee et~al.~\cite{kachuee2018ecg} provide the
+centralized baseline we reproduce; their reported test accuracy on
+MIT-BIH is in the 0.97--0.99 range, consistent with the framework's
+0.988 (\S\ref{sec:f4.1}). The published FL-on-ECG papers we surveyed
+report similar headline accuracy under FedAvg or its variants but do
+\emph{not} report majority-class baseline alongside top-1 accuracy ---
+the editorial gap that motivates Finding 6.1 of this thesis.
+
+\paragraph{FL on healthcare more broadly.} Rieke
+et~al.~\cite{rieke2020future} survey the deployment landscape of
+federated learning across medical imaging, EHR, and wearable health
+data, and identify class imbalance as one of three open challenges (the
+other two being client heterogeneity and protocol robustness). Our
+class-prior collapse finding is a concrete instance of the imbalance
+challenge they flag.
+
+\paragraph{Regulatory framing.} HIPAA (Health Insurance Portability and
+Accountability Act 1996, US Public Law 104-191) and GDPR (Regulation
+(EU) 2016/679) are the two regulatory regimes that motivate the
+thesis's data-minimisation framing. Federated learning is a natural
+technical instantiation of the data-minimisation principle: training
+data does not leave the device.
+
+\section{Attacks: membership inference and gradient inversion}\label{sec:rw-attacks}
+
+\paragraph{Membership inference.} Shokri
+et~al.~\cite{shokri2017membership} demonstrated that an adversary with
+black-box query access to a trained model can determine, with non-trivial
+accuracy, whether a given record was in the training set. This is the
+canonical attack against adversary A4 in Chapter~\ref{ch:threat}, and the
+attack DP is built to defeat. The Yeom
+et~al.~\cite{yeom2018membership} privacy-loss formalisation maps
+membership-inference advantage to a function of $\varepsilon$, providing
+a quantitative connection between the DP budget and attack success.
+
+\paragraph{Gradient inversion.} Geiping
+et~al.~\cite{geiping2020inverting} showed that an honest-but-curious
+server can reconstruct individual training images with high fidelity from
+the per-client gradient updates of a federated round, even under
+multi-step FedAvg-style local training. The attack generalises beyond
+images to other modalities and is the canonical attack against adversary
+A1 in Chapter~\ref{ch:threat}. SecAgg is the canonical defence: under
+SecAgg the server only ever sees the aggregate $\sum_i \Delta w_i$, and
+gradient inversion against the aggregate is a strictly harder problem
+than against a single client's update.
+
+\paragraph{Property inference.} Beyond per-record attacks, property
+inference~\cite{melis2019exploit} extracts aggregate statistics about the
+training set (e.g.\ the gender ratio of contributing patients) from model
+updates. The DP and SecAgg layers both partially mitigate property
+inference; a complete defence would require formalising group-level DP,
+which is future work.
+
+\section{What is not covered}
+
+The framework does not engage with three adjacent literatures that the
+threat model deliberately excludes (Chapter~\ref{ch:threat}):
+Byzantine-robust aggregation~\cite{blanchard2017krum, yin2018byzantine}
+(median, trimmed mean, Krum), free-rider detection (clients that submit
+zero or replay updates), and verifiable computation (cryptographic
+proof that the server aggregated correctly). All three are listed in
+\S\ref{sec:future} as natural extensions that compose cleanly on top of
+the existing privacy stack.
 
 \chapter{Threat model}\label{ch:threat}
 
@@ -1439,6 +1655,96 @@ AAAI 2022, pp.\ 7194--7201.
 Reza Shokri, Marco Stronati, Congzheng Song, and Vitaly Shmatikov.
 \emph{Membership Inference Attacks Against Machine Learning Models}.
 IEEE Symposium on Security and Privacy (S\&P) 2017, pp.\ 3--18.
+
+\bibitem{kairouz2021advances}
+Peter Kairouz, H.~Brendan McMahan, Brendan Avent, Aur{\'e}lien Bellet,
+Mehdi Bennis, et~al.
+\emph{Advances and Open Problems in Federated Learning}.
+Foundations and Trends in Machine Learning, 14(1--2):1--210, 2021.
+
+\bibitem{dwork2006dp}
+Cynthia Dwork.
+\emph{Differential Privacy}.
+ICALP 2006, pp.\ 1--12.
+
+\bibitem{gopi2021prv}
+Sivakanth Gopi, Yin Tat Lee, and Lukas Wutschitz.
+\emph{Numerical Composition of Differential Privacy}.
+NeurIPS 2021.
+
+\bibitem{mcmahan2018dpfedavg}
+H.~Brendan McMahan, Daniel Ramage, Kunal Talwar, and Li Zhang.
+\emph{Learning Differentially Private Recurrent Language Models}.
+ICLR 2018.
+
+\bibitem{wei2020dpfl}
+Kang Wei, Jun Li, Ming Ding, Chuan Ma, Howard~H. Yang, Farhad Farokhi,
+Shi Jin, Tony Q.~S. Quek, and H.~Vincent Poor.
+\emph{Federated Learning with Differential Privacy: Algorithms and
+Performance Analysis}.
+IEEE Transactions on Information Forensics and Security, 15:3454--3469,
+2020.
+
+\bibitem{bell2020secaggplus}
+James Henry Bell, Kallista A.\ Bonawitz, Adri{\`a} Gasc{\'o}n, Tancr{\`e}de
+Lepoint, and Mariana Raykova.
+\emph{Secure Single-Server Aggregation with (Poly)Logarithmic Overhead}.
+ACM CCS 2020, pp.\ 1253--1269.
+
+\bibitem{so2022lightsecagg}
+Jinhyun So, Chaoyang He, Chien-Sheng Yang, Songze Li, Qian Yu,
+Ramy E.\ Ali, Basak Guler, and Salman Avestimehr.
+\emph{LightSecAgg: A Lightweight and Versatile Design for Secure
+Aggregation in Federated Learning}.
+MLSys 2022.
+
+\bibitem{bernstein2018signsgd}
+Jeremy Bernstein, Yu-Xiang Wang, Kamyar Azizzadenesheli, and
+Anima Anandkumar.
+\emph{signSGD: Compressed Optimisation for Non-Convex Problems}.
+ICML 2018, pp.\ 560--569.
+
+\bibitem{aji2017topk}
+Alham Fikri Aji and Kenneth Heafield.
+\emph{Sparse Communication for Distributed Gradient Descent}.
+EMNLP 2017, pp.\ 440--445.
+
+\bibitem{rieke2020future}
+Nicola Rieke, Jonny Hancox, Wenqi Li, Fausto Milletari, Holger~R. Roth,
+Shadi Albarqouni, Spyridon Bakas, Mathieu~N. Galtier, Bennett~A. Landman,
+Klaus Maier-Hein, et~al.
+\emph{The Future of Digital Health with Federated Learning}.
+npj Digital Medicine, 3:119, 2020.
+
+\bibitem{yeom2018membership}
+Samuel Yeom, Irene Giacomelli, Matt Fredrikson, and Somesh Jha.
+\emph{Privacy Risk in Machine Learning: Analyzing the Connection to
+Overfitting}.
+IEEE Computer Security Foundations Symposium (CSF) 2018, pp.\ 268--282.
+
+\bibitem{geiping2020inverting}
+Jonas Geiping, Hartmut Bauermeister, Hannah Dr{\"o}ge, and
+Michael Moeller.
+\emph{Inverting Gradients --- How Easy Is It to Break Privacy in
+Federated Learning?}
+NeurIPS 2020.
+
+\bibitem{melis2019exploit}
+Luca Melis, Congzheng Song, Emiliano De~Cristofaro, and Vitaly Shmatikov.
+\emph{Exploiting Unintended Feature Leakage in Collaborative Learning}.
+IEEE Symposium on Security and Privacy (S\&P) 2019, pp.\ 691--706.
+
+\bibitem{blanchard2017krum}
+Peva Blanchard, El~Mahdi El~Mhamdi, Rachid Guerraoui, and Julien Stainer.
+\emph{Machine Learning with Adversaries: Byzantine Tolerant Gradient
+Descent}.
+NeurIPS 2017.
+
+\bibitem{yin2018byzantine}
+Dong Yin, Yudong Chen, Kannan Ramchandran, and Peter Bartlett.
+\emph{Byzantine-Robust Distributed Learning: Towards Optimal Statistical
+Rates}.
+ICML 2018, pp.\ 5650--5659.
 
 \end{thebibliography}
 
