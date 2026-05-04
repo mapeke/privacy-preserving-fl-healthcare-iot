@@ -1,0 +1,309 @@
+\documentclass[10pt,aspectratio=169]{beamer}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+
+\usetheme{Madrid}
+\usecolortheme{seagull}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{itemize items}[circle]
+\setbeamertemplate{caption}[numbered]
+
+\definecolor{accent}{HTML}{1F4E79}
+\setbeamercolor{frametitle}{fg=white,bg=accent}
+\setbeamercolor{title}{fg=accent}
+\setbeamercolor{structure}{fg=accent}
+
+\title[Privacy-Preserving FL on ECG]{Privacy-Preserving Federated Learning\\ for IoT-Based Healthcare}
+\subtitle{A Layered-Defense Benchmark on ECG Arrhythmia Classification}
+\author[Mapeke]{Mapeke}
+\institute[IITU]{Diploma defense \textbar{} IITU}
+\date{2026}
+
+\begin{document}
+
+% ----- 1. Title -----------------------------------------------------------
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% ----- 2. The problem ----------------------------------------------------
+\begin{frame}{The problem}
+  \begin{itemize}
+    \item Wearable health devices stream clinically valuable but \textbf{highly sensitive} ECG data.
+    \item Centralised training is the default $\Rightarrow$ single point of failure, re-identification risk, HIPAA/GDPR friction.
+    \item ``Privacy-preserving FL'' = DP-SGD + secure aggregation + compression. \textbf{Textbook recipe}.
+    \item The textbook does \emph{not} say \textbf{which layer pays for which threat}, or \textbf{what each costs} on imbalanced clinical data.
+  \end{itemize}
+  \vspace{0.5em}
+  \begin{block}{Gap addressed}
+    Empirical / measurement gap, not a new primitive. Build the layered-defence framework, measure the marginal cost of each layer on a realistic healthcare workload, surface what the headline-accuracy convention hides.
+  \end{block}
+\end{frame}
+
+% ----- 3. Contributions --------------------------------------------------
+\begin{frame}{Contributions}
+  \begin{enumerate}
+    \item[\textbf{C1}] \textbf{A layered-defence FL framework} with three independently switchable privacy layers (DP-SGD, pairwise-mask SecAgg, top-$k$ + int8 compression). $\sim$2{,}500 lines of Python; runs end-to-end in under 30 minutes on a single GPU.
+    \vspace{0.3em}
+    \item[\textbf{C2}] \textbf{Cryptographic correctness as a code-level invariant.} The SecAgg cancellation property is encoded as a unit test that runs in CI, not just argued in prose.
+    \vspace{0.3em}
+    \item[\textbf{C3}] \textbf{A class-prior collapse diagnostic for DP on imbalanced healthcare data.} Final test accuracy at $\varepsilon = 5$ equals class-\emph{N} prevalence to four decimals --- the model is the majority-class predictor.
+  \end{enumerate}
+\end{frame}
+
+% ----- 4. The privacy stack ----------------------------------------------
+\begin{frame}{The privacy stack}
+  Three layers, each addressing a different threat:
+  \vspace{0.5em}
+  \begin{table}
+    \centering
+    \begin{tabular}{lll}
+      \toprule
+      \textbf{Layer} & \textbf{Mechanism} & \textbf{Threat} \\
+      \midrule
+      Local training         & DP-SGD (Opacus, RDP accountant)     & Membership inference; gradient leakage \\
+      Aggregation            & Pairwise-mask SecAgg                & Honest-but-curious server; per-client tracing \\
+      Communication          & Top-$k$ sparsification + int8 quant. & Bandwidth budget for IoT \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vspace{0.5em}
+  Three orthogonal switches in code: \texttt{dp\_config}, \texttt{secagg\_session}, \texttt{compression\_method}. Each can be \texttt{None}; the corresponding layer degenerates to identity. This is what makes per-layer cost measurement possible.
+\end{frame}
+
+% ----- 5. Threat model ---------------------------------------------------
+\begin{frame}{Threat model: five adversaries}
+  \begin{table}
+    \centering
+    \scriptsize
+    \begin{tabular}{lp{3.6cm}p{3.5cm}p{3.5cm}}
+      \toprule
+      & \textbf{Capability} & \textbf{Goal} & \textbf{Mitigation} \\
+      \midrule
+      A1 Honest-but-curious server  & Sees every per-client message             & Per-client membership inference   & SecAgg \\
+      A2 Coalition of clients ($t < N$) & Pool masks                              & Unmask non-coalition update       & SecAgg (pairwise) \\
+      A3 Network eavesdropper       & Wire observation                          & Read updates                      & TLS + SecAgg \\
+      A4 Adversary holding $w_T$    & Inspect / query released model            & Membership inference at the model & DP-SGD \\
+      A5 Byzantine client           & Submit crafted updates                    & Poison or backdoor                & \textcolor{red!70!black}{Out of scope} \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vspace{0.4em}
+  Trust assumptions: TLS in place, secure PRG, no more than $N - 2$ clients collude, no hardware side channels.
+\end{frame}
+
+% ----- 6. Headline results -----------------------------------------------
+\begin{frame}{Headline results --- records 100--115 (97\% N)}
+  \begin{table}
+    \centering
+    \begin{tabular}{lcc}
+      \toprule
+      Configuration & Test acc & Final $\varepsilon$ \\
+      \midrule
+      Centralized (5 epochs)                                & \textbf{0.9878} & --- \\
+      FedAvg, 4 clients, 10 rounds                          & \textbf{0.9880} & --- \\
+      FedAvg + SecAgg                                       & 0.9860          & --- \\
+      FedAvg + DP, target $\varepsilon = 5$, 20 rounds      & 0.9711          & 4.9955 \\
+      Full pipeline (DP+SecAgg+Comp), $\varepsilon=8$, 30 rounds & 0.9711      & 7.9964 \\
+      \midrule
+      Class-\emph{N} prevalence (predict-all-N)             & \textcolor{red!70!black}{\textbf{0.9716}} & --- \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vspace{0.5em}
+  Three rows, three findings. The bottom row is the clue.
+\end{frame}
+
+% ----- 7. Finding 1: Federation is free ----------------------------------
+\begin{frame}{Finding 1 --- Federation is free}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \begin{itemize}
+      \item Centralized: \textbf{0.9878}
+      \item FedAvg (10 rounds): \textbf{0.9880}
+      \item Gap: \textbf{0.02 pp} --- well below seed variance.
+    \end{itemize}
+    \vspace{0.5em}
+    No proximal regulariser, no server momentum, no per-client correction. Plain FedAvg suffices when the model is not over-parameterised and client distributions are not adversarially heterogeneous.
+    \vspace{0.5em}
+    This is the empirical baseline against which every subsequent privacy layer is measured.
+    \column{0.45\textwidth}
+    \begin{block}{Round-by-round, vanilla FedAvg}
+      \footnotesize
+      0.9711, 0.9711, 0.9758, 0.9840, 0.9840,\\
+      0.9724, 0.9831, 0.9864, 0.9862, \textbf{0.9880}.
+    \end{block}
+    \vspace{0.5em}
+    First two rounds match class-\emph{N} prevalence; round 3 onwards picks up the V-class signal.
+  \end{columns}
+\end{frame}
+
+% ----- 8. Finding 2: SecAgg is free --------------------------------------
+\begin{frame}[fragile]{Finding 2 --- SecAgg is free + correctness in CI}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \begin{itemize}
+      \item FedAvg + SecAgg: \textbf{0.9860}
+      \item Gap vs.\ FedAvg: \textbf{0.20 pp} (float32 mask-cancellation noise).
+      \item Modular-integer arithmetic would close it; unnecessary for a simulation.
+    \end{itemize}
+    \vspace{0.5em}
+    \textbf{C2} contribution: the cancellation argument is encoded as one assertion in CI:
+    \begin{block}{The cryptographic correctness invariant}
+      \scriptsize
+      \verb|tests/test_secagg.py::|\\
+      \verb|test_masks_cancel_under_aggregation|\\[0.3em]
+      Sum of $N=4$ masked updates equals sum of unmasked updates to $10^{-4}$ in $\ell_2$.
+    \end{block}
+    \column{0.45\textwidth}
+    \textbf{Pairwise mask cancellation:}
+    \[
+      \tilde{\Delta w}_i = \Delta w_i + \!\!\sum_{j > i} m_{ij} - \!\!\sum_{j < i} m_{ji}
+    \]
+    \[
+      \sum_{i=1}^{N} \tilde{\Delta w}_i = \sum_{i=1}^{N} \Delta w_i.
+    \]
+    Every $m_{ij}$ appears once with $+$ and once with $-$. Exact cancellation.
+    \vspace{0.5em}
+    \emph{Recommendation:} run SecAgg by default --- below-noise utility cost, real threat coverage.
+  \end{columns}
+\end{frame}
+
+% ----- 9. Finding 3: DP class-prior collapse -----------------------------
+\begin{frame}{Finding 3 --- DP-SGD collapses to majority-class}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{Test accuracy round by round, DP-SGD ($\varepsilon \approx 5$):}
+    \begin{center}
+      \footnotesize
+      \begin{tabular}{cccccc}
+        \toprule
+        r1 & r2 & r3 & r4 & \ldots & r20 \\
+        \midrule
+        0.9711 & 0.9711 & 0.9711 & 0.9711 & \ldots & 0.9711 \\
+        \bottomrule
+      \end{tabular}
+    \end{center}
+    \vspace{0.4em}
+    Class-\emph{N} prevalence: $4{,}934 / 5{,}078 = 0.9716$.\\
+    Final DP-SGD accuracy: $0.9711$.\\
+    Agreement to \textbf{four decimals}.
+    \column{0.45\textwidth}
+    \begin{block}{The collapse, in one line}
+      The model is, with statistical certainty, the \emph{majority-class predictor}.
+    \end{block}
+    \vspace{0.4em}
+    \textbf{Train accuracy still rises} 0.9147 $\to$ 0.9712 across the same 20 rounds. The model learns \emph{something} during training; that something is ``predict N for everything.''
+    \vspace{0.4em}
+    Adding compression on top does not degrade further at $\varepsilon = 8$: same 0.9711.
+  \end{columns}
+\end{frame}
+
+% ----- 10. Why this matters editorially ----------------------------------
+\begin{frame}{Why this matters --- the headline-accuracy trap}
+  \begin{block}{Casual reading of the table}
+    DP at $\varepsilon = 5$ scores 0.9711 vs.\ FedAvg's 0.9880.\\
+    \textbf{``DP costs about 1.7 pp.''} Publishable.
+  \end{block}
+  \vspace{0.5em}
+  \begin{block}{Honest reading}
+    DP costs the model's ability to detect any rare class \emph{at all}.\\
+    The 0.9711 hides the failure precisely because the metric matches the cliff.
+  \end{block}
+  \vspace{0.5em}
+  \textbf{The thesis-level recommendation.} Any privacy-preserving FL paper for imbalanced healthcare data must report \textbf{majority-class baseline} and \textbf{macro-F1} alongside top-1 accuracy. The privacy/utility tradeoff curve is misleading without them.
+\end{frame}
+
+% ----- 11. Follow-up: records 200-234 ------------------------------------
+\begin{frame}{Follow-up --- records 200--234 (82\% N)}
+  Same five experiments. \textbf{No hyperparameters retuned.} Different MIT-BIH slice with moderate (not extreme) imbalance.
+  \vspace{0.4em}
+  \begin{table}
+    \centering
+    \footnotesize
+    \begin{tabular}{lccc}
+      \toprule
+      Configuration & 100--115 acc & 200--234 acc & vs.\ majority \\
+      \midrule
+      Centralized (5 epochs)                          & 0.9878 & 0.9389 & $+11.81$\,pp \\
+      FedAvg (10 rounds)                              & 0.9880 & 0.9636 & $+14.28$\,pp \\
+      FedAvg + SecAgg (10 rounds)                     & 0.9860 & 0.9558 & $+13.50$\,pp \\
+      FedAvg + DP, $\varepsilon \approx 5$ (20 rounds)& 0.9711 & \textbf{0.8845} & $\mathbf{+6.37}$\,\textbf{pp} \\
+      Full pipeline, $\varepsilon \approx 8$ (30 rounds)& 0.9711 & 0.8176 & $-0.32$\,pp \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vspace{0.4em}
+  \begin{itemize}
+    \item DP-only \textbf{climbs out} of the majority plateau --- the cliff is a property of \emph{extreme} imbalance, not DP-SGD per se.
+    \item Full pipeline still collapses --- top-$k$+int8 on top of DP noise pushes the regime back across the cliff.
+  \end{itemize}
+\end{frame}
+
+% ----- 12. Recommendations -----------------------------------------------
+\begin{frame}{Practical recommendations for deployment}
+  \begin{enumerate}
+    \item \textbf{Run SecAgg by default.} Below-noise utility cost, threat coverage for A1--A3, correctness in one CI test.
+    \vspace{0.3em}
+    \item \textbf{Treat DP-SGD on imbalanced clinical data as non-trivial.} Always report majority-class baseline and macro-F1.
+    \vspace{0.3em}
+    \item \textbf{Compression is free in the post-DP regime.} If the model is at the privacy floor, top-$k$+int8 buys $\sim$$40\times$ bandwidth at no further utility cost. If the model is not at the floor, compression introduces real approximation error and must be measured.
+    \vspace{0.3em}
+    \item \textbf{Benchmark on your actual class distribution} before fixing the budget. The cliff exists; its location depends on the workload.
+  \end{enumerate}
+\end{frame}
+
+% ----- 13. Limitations ---------------------------------------------------
+\begin{frame}{Limitations (be candid)}
+  \begin{itemize}
+    \item \textbf{Single-seed} runs --- multi-seed across all five configurations is the first item of future work.
+    \item \textbf{Simulation only} --- Flower in-process, no real network or device-compute constraints.
+    \item \textbf{SecAgg is a prototype} --- pre-shared seeds (no Diffie--Hellman), no Shamir secret-sharing (no dropout tolerance), float32 not modular integer.
+    \item \textbf{Per-record DP, not per-patient.} Group privacy gives a vacuous bound at the patient level for our partition.
+    \item \textbf{No comparison to FedProx / SCAFFOLD / Krum} --- FedAvg already matches centralized; out of scope.
+    \item \textbf{Macro-F1 not logged round-by-round} for the federated runs --- would have surfaced the collapse earlier.
+  \end{itemize}
+\end{frame}
+
+% ----- 14. Future work ---------------------------------------------------
+\begin{frame}{Future work --- what fits cleanly on top}
+  \begin{enumerate}
+    \item \textbf{Multi-seed runs} across all five configurations; error bars on the headline table.
+    \item \textbf{Class-weighted DP-SGD} on records 200--234 (where DP-SGD alone clears the cliff and the full pipeline does not).
+    \item \textbf{Modular-integer SecAgg} to remove the 0.20\,pp float32 cancellation noise.
+    \item \textbf{Byzantine-robust aggregation} (Krum, median, trimmed mean) composed with the existing privacy stack.
+    \item \textbf{MIMIC-IV vital-signs port} to test whether class-prior collapse generalises beyond ECG.
+    \item \textbf{Diffie--Hellman + Shamir secret-sharing} to upgrade the SecAgg prototype to a deployment-grade, dropout-tolerant protocol.
+  \end{enumerate}
+\end{frame}
+
+% ----- 15. Conclusion ----------------------------------------------------
+\begin{frame}{Conclusion}
+  \begin{itemize}
+    \item Built a layered-defence FL framework with three independently switchable privacy layers on top of FedAvg. Five reproducible experiments; every number tied to one YAML config.
+    \item \textbf{Federation is free} on this workload (0.02 pp gap).
+    \item \textbf{SecAgg is free} (0.20 pp), and its cryptographic correctness is a one-line CI invariant.
+    \item \textbf{DP-SGD collapses to majority-class} on extreme imbalance --- a privacy/utility cliff that the headline-accuracy convention hides. Dataset-conditional: on moderate imbalance DP-SGD alone clears the cliff but the full pipeline still does not.
+    \item \textbf{One recommendation for the field:} report majority-class baseline and macro-F1 alongside top-1 accuracy. Always.
+  \end{itemize}
+\end{frame}
+
+% ----- 16. Thank you -----------------------------------------------------
+\begin{frame}
+  \vfill
+  \begin{center}
+    {\Huge \textbf{Thank you}}\\[1em]
+    {\Large Questions?}\\[1.5em]
+    \footnotesize
+    Code, configs, thesis source:\\
+    \url{https://github.com/mapeke/privacy-preserving-fl-healthcare-iot}
+  \end{center}
+  \vfill
+\end{frame}
+
+\end{document}

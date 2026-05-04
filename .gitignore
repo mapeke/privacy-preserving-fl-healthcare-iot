@@ -99,3 +99,13 @@ docs/thesis/*.toc
 docs/thesis/*.fls
 docs/thesis/*.fdb_latexmk
 docs/thesis/*.synctex.gz
+
+# Beamer build artifacts
+docs/presentation/*.aux
+docs/presentation/*.log
+docs/presentation/*.out
+docs/presentation/*.toc
+docs/presentation/*.nav
+docs/presentation/*.snm
+docs/presentation/*.vrb
+docs/presentation/*.synctex.gz
