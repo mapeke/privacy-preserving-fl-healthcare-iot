@@ -128,7 +128,12 @@ collapses.
 \section{Structure}
 
 Chapter~\ref{ch:bg} reviews FL, the three privacy primitives we layer, and the
-MIT-BIH dataset. Chapter~\ref{ch:method} describes the implementation:
+MIT-BIH dataset.
+Chapter~\ref{ch:threat} formalises the threat model: the assets being
+protected, five adversaries A1--A5 with their capabilities and goals, the
+attack-surface coverage matrix, and the trust assumptions the framework
+inherits.
+Chapter~\ref{ch:method} describes the implementation:
 \texttt{FlowerHealthcareClient}, \texttt{PrivacyAwareFedAvg},
 \texttt{DPConfig+attach\_dp}, the pairwise-mask SecAgg primitives, and the
 top-$k$/int8 compression pipeline. Chapter~\ref{ch:detection} reports the
@@ -261,6 +266,238 @@ ECG monitoring is the canonical wearable-IoT health workload; MIT-BIH is the
 canonical benchmark for it; the AAMI mapping is the canonical label scheme.
 A privacy-preserving FL framework that ignores the imbalance characteristic of
 this canonical workload is over-claiming.
+
+\chapter{Threat model}\label{ch:threat}
+
+The privacy stack of this framework is only as meaningful as the adversary
+it is built against. This chapter enumerates the assets being protected, the
+adversaries the framework defends against, the capabilities each is granted,
+which component of the privacy stack mitigates each threat, and the trust
+assumptions inherited from the deployment substrate. The threat model is the
+contract that the design choices in Chapter~\ref{ch:method} are built to
+honour, and the limitations called out in Chapter~\ref{ch:disc} are the
+places where the contract is honoured only partially.
+
+\section{Assets being protected}
+
+Five categories of asset flow through the framework, each with its own
+sensitivity profile (Table~\ref{tab:assets}). Raw waveforms and labels are
+both protected health information (PHI) under HIPAA and personal data under
+GDPR; per-client gradient updates leak training data via gradient-inversion
+attacks even though they are nominally derived data; the aggregated global
+model is the published artefact that membership-inference attacks operate on;
+patient and device identifiers are quasi-identifiers that must not be
+re-linkable to the local partitions.
+
+\begin{table}[h]
+  \centering
+  \caption{Assets the framework protects and their sensitivity. The privacy
+  stack is responsible for preventing leakage of every row except patient
+  identity, which is handled at the deployment layer (no identifier ever
+  leaves the device in our protocol).}
+  \label{tab:assets}
+  \begin{tabular}{ll}
+    \toprule
+    Asset & Sensitivity \\
+    \midrule
+    Raw ECG waveforms                       & PHI under HIPAA; highly sensitive \\
+    Local labels (arrhythmia class)         & Diagnostic; highly sensitive \\
+    Per-client model updates ($\Delta w_i$) & Leaks training data via gradient inversion \\
+    Aggregated global model $w_t$           & Leaks via membership inference \\
+    Patient / device identity               & Quasi-identifier; must not be re-linkable \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Adversaries and capabilities}
+
+Five adversary archetypes are considered. The first four are inside the
+contract; the fifth is explicitly out of scope and motivates a future-work
+item in Chapter~\ref{ch:disc}.
+
+\subsection{A1 --- Honest-but-curious aggregation server}
+
+\paragraph{Capability.} Sees every message that reaches the server: per-client
+parameter updates, per-client metadata (number of training samples, training
+loss, latency telemetry), broadcast parameters, and round-level scheduling
+information.
+
+\paragraph{Behaviour.} Follows the protocol faithfully. Does not deviate from
+the aggregation rule, drop messages, or inject crafted messages.
+
+\paragraph{Goal.} Infer training-data properties of any individual client
+from its update --- e.g.\ reconstruct individual training records from
+$\Delta w_i$ via gradient-inversion attacks, or learn whether a particular
+patient's beats appear in client $i$'s partition.
+
+\paragraph{Mitigation.} Pairwise-mask secure aggregation
+(Chapter~\ref{ch:method}, \S\ref{sec:method-strategy}). Under SecAgg, the
+server's view of every per-round message is a uniformly random vector;
+only the sum across all clients de-randomises into the true aggregate of
+deltas. The server therefore has access to $\sum_i \Delta w_i$ but not to
+any individual $\Delta w_i$.
+
+\subsection{A2 --- Curious-client coalition (size $t < N$)}
+
+\paragraph{Capability.} A subset of clients colludes among themselves. They
+pool their private masks (or shared seeds in the prototype), their broadcast
+parameters, and the metadata they each receive from the server.
+
+\paragraph{Behaviour.} Trains honestly so as not to be detected by simple
+correctness checks (the framework's SecAgg is not currently
+correctness-verifiable from the server's side; that is future work).
+
+\paragraph{Goal.} Unmask a non-coalition client's update.
+
+\paragraph{Mitigation.} Pairwise masks between every unordered client pair
+$\{i,j\}$ mean that a coalition of size $t$ learns nothing about non-coalition
+updates as long as at least one mask between an honest pair survives the
+collusion. With $N = 4$ and pairwise masks the basic scheme withstands a
+coalition of up to $t = N - 2 = 2$ without compromise; with $t = N - 1 = 3$
+the scheme leaks the remaining update because the only mask the honest
+client uses is one whose seed is held by a coalition member.
+
+\subsection{A3 --- Network eavesdropper}
+
+\paragraph{Capability.} Passive observation of the wire between client and
+server (e.g.\ an on-path attacker on Wi-Fi, an ISP, or a nation-state
+adversary at the network layer).
+
+\paragraph{Goal.} Same as A1, but with the additional restriction that the
+adversary does not control the server's storage or compute.
+
+\paragraph{Mitigation.} Transport-layer encryption (TLS, assumed; out of
+scope for the prototype but standard in any production deployment). The
+masked SecAgg payload is also a uniformly random vector to a network
+observer, providing defence-in-depth: even if TLS is subsequently broken,
+A3's view is no better than A1's, which SecAgg already addresses.
+
+\subsection{A4 --- External adversary holding the released global model}
+
+\paragraph{Capability.} Inspects, queries, or fine-tunes the released global
+model weights $w_T$. Does not see per-round messages. Has access to
+auxiliary information about all but one of the training records (the
+worst-case threat model for differential privacy).
+
+\paragraph{Goal.} Membership inference: ``was patient $P$'s data in the
+training set?'' or its quantitative variant, ``what fraction of patients in
+this hospital appear in the training set?''. Reconstruction: recover
+features of the training distribution beyond what is published.
+
+\paragraph{Mitigation.} \textbf{Differential privacy} with budget
+$(\varepsilon, \delta)$ at the per-record level. With $\varepsilon = 5$ and
+$\delta = 10^{-5}$ (the framework's default targets) the worst-case posterior
+shift on any single-record membership question is at most $e^{\varepsilon}
+\approx 148$, and empirical membership-inference accuracy is typically much
+closer to the $50\%$ random-guess baseline. The cost of this guarantee on
+imbalanced healthcare data is the central finding of Chapter~\ref{ch:dp}.
+
+\subsection{A5 --- Malicious (Byzantine) client}
+
+\paragraph{Capability.} Deviates arbitrarily from the protocol: submits
+crafted updates designed to poison the global model, install a backdoor,
+or break SecAgg by sending mismatched mask contributions.
+
+\paragraph{Goal.} Either degrade the global model's utility, install a
+trigger pattern that produces attacker-chosen outputs at inference time,
+or extract information from honest clients by exploiting protocol
+deviations.
+
+\paragraph{Out of scope.} The framework's threat model does not include A5.
+Robust aggregation rules (Krum, coordinate-wise median, trimmed mean,
+multi-Krum) and protocol-level integrity checks would be the natural
+defences; both are listed as future work in Chapter~\ref{ch:disc},
+\S\ref{sec:future}. The simulation never produces an A5: the four clients
+are honest by construction.
+
+\section{Attack-surface coverage matrix}
+
+Table~\ref{tab:attack-surface} maps the five canonical attacks against
+federated learning to which adversary mounts them and which layer of the
+privacy stack mitigates each one. The matrix is the most compact statement
+of the contract: every cell either references a mitigation or is explicitly
+out of scope. There are no implicit guarantees.
+
+\begin{table}[h]
+  \centering
+  \caption{Attack-surface coverage. Cells marked \emph{SecAgg} are mitigated
+  by the pairwise-mask layer, cells marked \emph{DP} by differential privacy,
+  cells marked \emph{TLS+SecAgg} by both, and cells marked \emph{OOS} are
+  out of scope (Byzantine adversary A5).}
+  \label{tab:attack-surface}
+  \begin{tabular}{lccccc}
+    \toprule
+    Attack & A1 & A2 & A3 & A4 & A5 \\
+    \midrule
+    Gradient inversion                    & SecAgg     & SecAgg     & TLS+SecAgg & ---  & OOS \\
+    Per-update membership inference       & SecAgg     & SecAgg     & TLS+SecAgg & ---  & OOS \\
+    Global-model membership inference     & DP         & DP         & ---        & DP   & OOS \\
+    Reconstruction from compressed update & SecAgg     & SecAgg     & TLS+SecAgg & ---  & OOS \\
+    Model poisoning / backdoor            & ---        & ---        & ---        & ---  & OOS \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Why compression does not weaken the matrix.}
+Top-$k$ + int8 compression sits between local DP-SGD and SecAgg masking on
+the client (Chapter~\ref{ch:method}, \S\ref{sec:method-strategy}). Because
+SecAgg is applied \emph{after} compression, the wire payload is still a
+uniformly random vector to A1/A2/A3, and the compressed update is never
+visible in the clear. DP's post-processing immunity ensures that compression
+does not weaken A4's bound on the released global model. Compression is a
+bandwidth optimisation, not a privacy defence; it is included in the matrix
+only to make explicit that it does not subtract from the matrix either.
+
+\section{Trust assumptions}\label{sec:trust}
+
+The framework's guarantees are conditional on four trust assumptions
+inherited from the deployment substrate:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{TLS is in place between every client and the server} ---
+  standard mTLS in any production deployment. The simulation does not
+  exercise this; in a real IoT deployment it is non-negotiable.
+  \item \textbf{The pseudo-random generator used to derive masks is
+  cryptographically secure.} The prototype uses Python's \texttt{secrets}
+  module for seed generation and a deterministic NumPy generator from that
+  seed for mask material; the latter is sufficient for simulation but a
+  production deployment would seed an authenticated stream cipher (e.g.\
+  AES-CTR) instead.
+  \item \textbf{No more than $N - 2$ clients collude.} The basic
+  pairwise-mask scheme has no Shamir secret-sharing fallback (a deliberate
+  prototype simplification, called out in
+  \texttt{src/privacy/secure\_agg.py}), so a coalition of $N - 1$ clients
+  reconstructs the remaining client's update.
+  \item \textbf{Hardware-level side channels (timing, power, EM) on the IoT
+  device are out of scope.} A real wearable deployment would also need
+  hardware countermeasures; without them, an attacker with physical access
+  to a device can extract the local model or training data regardless of
+  what the FL protocol does.
+\end{enumerate}
+
+\section{What is explicitly out of scope}
+
+Beyond A5, four classes of guarantee are explicitly not provided:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Byzantine robustness / poisoning defences.} Future work
+  (\S\ref{sec:future}); the natural extension is robust aggregation
+  (Krum, median, trimmed mean) composed with the existing privacy stack.
+  \item \textbf{Hardware-level side channels.} Out of scope at the protocol
+  layer; addressed at the deployment layer with hardware countermeasures.
+  \item \textbf{Verifiable computation} (cryptographic proof that the
+  server aggregated correctly). The framework trusts that the server runs
+  the strategy code it claims to run; deployments in adversarial settings
+  would add zk-SNARK or trusted-execution-environment-based attestation.
+  \item \textbf{Free-rider detection.} A client that submits zero-update
+  vectors round after round contributes nothing to the global model but
+  receives the benefit of others' updates; the framework does not detect
+  or penalise this. Reputation and contribution-tracking systems are the
+  standard defence; we do not implement either.
+\end{itemize}
+
+These are flagged again in the conclusions chapter as natural extensions
+that fit cleanly on top of the existing privacy stack.
 
 \chapter{Method}\label{ch:method}
 
